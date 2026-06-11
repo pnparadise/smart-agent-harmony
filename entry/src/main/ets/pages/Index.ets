@@ -1,4 +1,4 @@
-import { bundle, common, Want } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { buffer } from '@kit.ArkTS';
 import { fileIo, picker, ReadOptions } from '@kit.CoreFileKit';
 import { vpnExtension } from '@kit.NetworkKit';
@@ -1743,49 +1743,9 @@ struct Index {
   private async loadAvailableSplitApps(): Promise<void> {
     this.appPickerLoading = true;
     this.appPickerError = '';
-    try {
-      const apps = await this.queryInstalledBrowsers();
-      this.availableSplitApps = this.mergeSelectedSplitApps(apps);
-      hilog.info(DOMAIN, TAG, 'loaded split app candidates count=%{public}d', this.availableSplitApps.length);
-    } catch (err) {
-      const error = err as BusinessError;
-      this.availableSplitApps = this.selectedSplitApps;
-      this.appPickerError = error.message ?? JSON.stringify(err);
-    } finally {
-      this.appPickerLoading = false;
-    }
-  }
-
-  private async queryInstalledBrowsers(): Promise<SplitAppInfo[]> {
-    const wantInfo: Want = {
-      action: 'ohos.want.action.viewData',
-      entities: ['entity.system.browsable'],
-      uri: 'https://'
-    };
-
-    const abilities: bundle.AbilityInfo[] = await bundle.queryAbilityByWant(
-      wantInfo,
-      bundle.BundleFlag.GET_BUNDLE_DEFAULT
-    );
-    const apps: SplitAppInfo[] = [];
-    const seenBundleNames: string[] = [];
-
-    for (let index = 0; index < abilities.length; index++) {
-      const bundleName = abilities[index].bundleName;
-      if (bundleName.length === 0 || bundleName === BUNDLE_NAME || this.hasString(seenBundleNames, bundleName)) {
-        continue;
-      }
-
-      const app: SplitAppInfo = {
-        bundleName: bundleName,
-        label: bundleName
-      };
-      apps.push(app);
-      seenBundleNames.push(bundleName);
-    }
-
-    apps.sort((left: SplitAppInfo, right: SplitAppInfo) => left.label.localeCompare(right.label));
-    return apps;
+    this.availableSplitApps = this.mergeSelectedSplitApps([]);
+    this.appPickerLoading = false;
+    hilog.info(DOMAIN, TAG, 'loaded manual split app list count=%{public}d', this.availableSplitApps.length);
   }
 
   private async addSplitAppByBundleName(): Promise<void> {
