@@ -27,6 +27,11 @@ export interface TunnelRuntimeStatus {
   updatedAt: number;
 }
 
+export interface SplitAppInfo {
+  bundleName: string;
+  label: string;
+}
+
 const STORE_NAME = 'wg_agent';
 const DOMAIN = 0x0001;
 const TAG = 'ConfigStore';
@@ -47,6 +52,8 @@ const STATUS_PACKET_SENT_KEY = 'wg_status_latest_packet_sent_seconds';
 const STATUS_LOSS_KEY = 'wg_status_loss';
 const STATUS_RTT_KEY = 'wg_status_rtt_millis';
 const STATUS_UPDATED_AT_KEY = 'wg_status_updated_at';
+const APP_SPLIT_ENABLED_KEY = 'wg_app_split_enabled';
+const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
 
 type StoreContext = common.UIAbilityContext | common.VpnExtensionContext;
 
@@ -208,6 +215,49 @@ export async function loadTunnelRuntimeStatus(
   return status;
 }
 
+export async function saveAppSplitEnabled(context: StoreContext, enabled: boolean): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  await store.put(APP_SPLIT_ENABLED_KEY, enabled);
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save app split enabled=%{public}s', String(enabled));
+}
+
+export async function loadAppSplitEnabled(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<boolean> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const enabled = await store.get(APP_SPLIT_ENABLED_KEY, false) as boolean;
+  hilog.info(DOMAIN, TAG, 'load app split enabled=%{public}s', String(enabled));
+  return enabled;
+}
+
+export async function saveSelectedSplitApps(context: StoreContext, apps: SplitAppInfo[]): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  await store.put(APP_SPLIT_APPS_KEY, formatSplitAppList(apps));
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save selected split apps count=%{public}d', apps.length);
+}
+
+export async function loadSelectedSplitApps(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<SplitAppInfo[]> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const rawValue = await store.get(APP_SPLIT_APPS_KEY, '');
+  const apps = parseSplitAppList(rawValue as string);
+  hilog.info(DOMAIN, TAG, 'load selected split apps count=%{public}d', apps.length);
+  return apps;
+}
+
 async function removeStoreFromCache(context: StoreContext): Promise<void> {
   try {
     await preferences.removePreferencesFromCache(context, STORE_NAME);
@@ -294,6 +344,50 @@ function parseIdList(rawValue: string): string[] {
     }
   }
   return ids;
+}
+
+function formatSplitAppList(apps: SplitAppInfo[]): string {
+  const lines: string[] = [];
+  for (let index = 0; index < apps.length; index++) {
+    const app = apps[index];
+    if (app.bundleName.length > 0) {
+      lines.push(encodeURIComponent(app.bundleName) + '\t' + encodeURIComponent(app.label));
+    }
+  }
+  return lines.join('\n');
+}
+
+function parseSplitAppList(rawValue: string): SplitAppInfo[] {
+  if (rawValue.length === 0) {
+    return [];
+  }
+
+  const lines = rawValue.split('\n');
+  const apps: SplitAppInfo[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.length === 0) {
+      continue;
+    }
+
+    const parts = line.split('\t');
+    if (parts.length < 1 || parts[0].length === 0) {
+      continue;
+    }
+
+    try {
+      const bundleName = decodeURIComponent(parts[0]);
+      const label = parts.length > 1 ? decodeURIComponent(parts[1]) : bundleName;
+      const app: SplitAppInfo = {
+        bundleName: bundleName,
+        label: label.length > 0 ? label : bundleName
+      };
+      apps.push(app);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'parse selected split app failed: %{public}s', formatUnknownError(err));
+    }
+  }
+  return apps;
 }
 
 async function saveTunnelToStore(store: preferences.Preferences, tunnel: TunnelConfig, ids: string[]): Promise<void> {

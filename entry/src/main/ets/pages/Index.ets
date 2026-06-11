@@ -1,22 +1,28 @@
-import { common, Want } from '@kit.AbilityKit';
+import { bundle, common, Want } from '@kit.AbilityKit';
 import { buffer } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo, picker, ReadOptions } from '@kit.CoreFileKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import {
   clearActiveTunnel,
   createTunnelId,
   deleteTunnel,
+  loadAppSplitEnabled,
+  loadSelectedSplitApps,
   loadTunnelRuntimeStatus,
   loadTunnels,
   saveActiveTunnel,
+  saveAppSplitEnabled,
+  saveSelectedSplitApps,
   saveTunnelRuntimeStatus,
   saveTunnel,
+  SplitAppInfo,
   TunnelConfig,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
+import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 
 const BUNDLE_NAME = 'com.smart.agent';
@@ -34,6 +40,7 @@ const RUNNING_TUNNEL_BACKGROUND = '#EEF1F5';
 const RUNNING_STATUS_COLOR = '#4B5563';
 const STATUS_REFRESH_INTERVAL_MS = 1000;
 const STATUS_STALE_MS = 5000;
+const CONTINUOUS_TASK_RETRY_MS = 30000;
 const STATUS_CARD_RADIUS = 8;
 const PRIMARY_BLUE = '#3478F6';
 const PAGE_BACKGROUND = '#F4F6FA';
@@ -80,12 +87,19 @@ struct Index {
   @State private startingTunnelId: string = '';
   @State private startingTunnelName: string = '';
   @State private currentTabIndex: number = TAB_TUNNELS;
-  @State private appSplitEnabled: boolean = true;
+  @State private appSplitEnabled: boolean = false;
   @State private smartAgentEnabled: boolean = false;
   @State private dohEnabled: boolean = true;
   @State private persistentProtectionEnabled: boolean = true;
   @State private dohProvider: string = 'https://dns.alidns.com/dns-query';
-  @State private selectedAppCount: number = 8;
+  @State private selectedSplitApps: SplitAppInfo[] = [];
+  @State private appPickerOpen: boolean = false;
+  @State private availableSplitApps: SplitAppInfo[] = [];
+  @State private draftSelectedBundleNames: string[] = [];
+  @State private appPickerLoading: boolean = false;
+  @State private appPickerError: string = '';
+  @State private appBundleNameInput: string = '';
+  @State private appPickerNotice: string = '';
   @State private logs: AgentLogEntry[] = [];
   @State private tabBarWidth: number = 0;
   @State private tabIndicatorProgress: number = TAB_TUNNELS;
@@ -93,10 +107,13 @@ struct Index {
   @State private highlightedTabIndex: number = TAB_TUNNELS;
   private statusRefreshTimer: number = -1;
   private swipeStartDeleteWidth: number = 0;
+  private continuousTaskRunning: boolean = false;
+  private continuousTaskStartFailedAt: number = 0;
 
   aboutToAppear(): void {
     hilog.info(DOMAIN, TAG, 'aboutToAppear');
     this.loadTunnelList();
+    this.loadAppSplitSettings();
     this.refreshRuntimeStatus();
     this.startStatusRefresh();
   }
@@ -111,6 +128,9 @@ struct Index {
       if (this.editingTunnelId.length > 0) {
         this.buildEditorHeader();
         this.buildTunnelEditor();
+      } else if (this.appPickerOpen) {
+        this.buildAppPickerHeader();
+        this.buildAppPickerPage();
       } else {
         this.buildMainHeader();
         this.buildMainTabs();
@@ -187,6 +207,66 @@ struct Index {
         .margin({ left: 8 })
         .onClick(() => {
           this.saveEditingTunnel();
+        })
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 22, bottom: 18 })
+    .backgroundColor(CARD_BACKGROUND)
+    .shadow({ radius: 14, color: '#10000000', offsetX: 0, offsetY: 2 })
+    .zIndex(2)
+  }
+
+  @Builder
+  private buildAppPickerHeader() {
+    Row() {
+      Button() {
+        Image($r('app.media.ic_back_blue'))
+          .width(22)
+          .height(22)
+      }
+        .type(ButtonType.Normal)
+        .width(44)
+        .height(44)
+        .backgroundColor(ACTION_BUTTON_BACKGROUND)
+        .borderRadius(ACTION_BUTTON_RADIUS)
+        .borderWidth(0)
+        .margin({ right: 12 })
+        .onClick(() => {
+          this.closeAppPicker();
+        })
+
+      Column() {
+        Text('选择应用')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(TEXT_PRIMARY)
+          .maxLines(1)
+        Text('仅选中的应用流量走 VPN')
+          .fontSize(12)
+          .fontColor(TEXT_SECONDARY)
+          .maxLines(1)
+          .margin({ top: 4 })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Button() {
+        Image($r('app.media.ic_check_blue'))
+          .width(22)
+          .height(22)
+      }
+        .enabled(!this.appPickerLoading)
+        .type(ButtonType.Normal)
+        .width(44)
+        .height(44)
+        .backgroundColor(ACTION_BUTTON_BACKGROUND)
+        .borderRadius(ACTION_BUTTON_RADIUS)
+        .borderWidth(0)
+        .margin({ left: 8 })
+        .onClick(() => {
+          this.saveAppPickerSelection().catch((err: BusinessError) => {
+            this.appPickerError = err.message ?? JSON.stringify(err);
+          });
         })
     }
     .width('100%')
@@ -412,16 +492,21 @@ struct Index {
         .fontSize(12)
         .fontWeight(FontWeight.Bold)
         .fontColor('#8A8D93')
+        .width('100%')
+        .textAlign(TextAlign.Start)
         .maxLines(1)
       Text(this.isRuntimeActive() ? this.runtimeTunnelLabel() : '直连')
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
         .fontColor(TEXT_PRIMARY)
+        .width('100%')
+        .textAlign(TextAlign.Start)
         .maxLines(1)
         .margin({ top: 10 })
     }
     .alignItems(HorizontalAlign.Start)
-    .layoutWeight(1)
+    .layoutWeight(0.7)
+    .padding({ right: 8 })
   }
 
   @Builder
@@ -431,16 +516,20 @@ struct Index {
         .fontSize(12)
         .fontWeight(FontWeight.Bold)
         .fontColor('#8A8D93')
+        .width('100%')
+        .textAlign(TextAlign.Center)
         .maxLines(1)
       Text(this.formatDesignBytes(this.runtimeTxBytes))
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
         .fontColor(TEXT_PRIMARY)
+        .width('100%')
+        .textAlign(TextAlign.Center)
         .maxLines(1)
         .margin({ top: 10 })
     }
-    .alignItems(HorizontalAlign.Start)
-    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+    .layoutWeight(1.15)
   }
 
   @Builder
@@ -450,16 +539,20 @@ struct Index {
         .fontSize(12)
         .fontWeight(FontWeight.Bold)
         .fontColor('#8A8D93')
+        .width('100%')
+        .textAlign(TextAlign.Center)
         .maxLines(1)
       Text(this.formatDesignBytes(this.runtimeRxBytes))
         .fontSize(18)
         .fontWeight(FontWeight.Bold)
         .fontColor(TEXT_PRIMARY)
+        .width('100%')
+        .textAlign(TextAlign.Center)
         .maxLines(1)
         .margin({ top: 10 })
     }
-    .alignItems(HorizontalAlign.Start)
-    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+    .layoutWeight(1.15)
   }
 
   @Builder
@@ -625,6 +718,214 @@ struct Index {
   }
 
   @Builder
+  private buildAppPickerPage() {
+    Column() {
+      if (this.appPickerLoading) {
+        Column() {
+          Text('加载应用中')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(TEXT_PRIMARY)
+          Text('正在校验已添加应用')
+            .fontSize(13)
+            .fontColor(TEXT_SECONDARY)
+            .margin({ top: 8 })
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else if (this.appPickerError.length > 0) {
+        Column() {
+          Text('无法读取应用列表')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(TEXT_PRIMARY)
+          Text(this.appPickerError)
+            .fontSize(13)
+            .fontColor(TEXT_SECONDARY)
+            .textAlign(TextAlign.Center)
+            .margin({ top: 8 })
+          Button() {
+            Text('重试')
+              .fontSize(16)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(CARD_BACKGROUND)
+          }
+            .type(ButtonType.Normal)
+            .height(44)
+            .padding({ left: 24, right: 24 })
+            .backgroundColor(PRIMARY_BLUE)
+            .borderRadius(10)
+            .margin({ top: 18 })
+            .onClick(() => {
+              this.loadAvailableSplitApps();
+            })
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .padding({ left: 28, right: 28 })
+      } else {
+        this.buildAppBundleInput()
+
+        Row() {
+          Text('已选 ' + String(this.draftSelectedBundleNames.length) + ' 个应用')
+            .fontSize(14)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#8A8D93')
+          Blank()
+            .layoutWeight(1)
+        }
+        .width('100%')
+        .height(42)
+        .padding({ left: 20, right: 20 })
+
+        if (this.availableSplitApps.length === 0) {
+          Column() {
+            Text('输入包名添加应用')
+              .fontSize(17)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(TEXT_PRIMARY)
+            Text('例如 com.example.app')
+              .fontSize(13)
+              .fontColor(TEXT_SECONDARY)
+              .textAlign(TextAlign.Center)
+              .margin({ top: 8 })
+          }
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .padding({ left: 28, right: 28 })
+        } else {
+          List() {
+            ForEach(this.availableSplitApps, (app: SplitAppInfo) => {
+              ListItem() {
+                this.buildAppPickerRow(app);
+              }
+              .margin({ bottom: 10 })
+            }, (app: SplitAppInfo) => app.bundleName)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .padding({ left: 20, right: 20, bottom: 20 })
+        }
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .backgroundColor(PAGE_BACKGROUND)
+  }
+
+  @Builder
+  private buildAppBundleInput() {
+    Column() {
+      Row() {
+        TextInput({
+          text: this.appBundleNameInput,
+          placeholder: '输入应用包名'
+        })
+          .layoutWeight(1)
+          .height(44)
+          .fontSize(14)
+          .fontColor(TEXT_PRIMARY)
+          .backgroundColor(CARD_BACKGROUND)
+          .padding({ left: 12, right: 12 })
+          .border({ width: 1, color: '#E4E7EC', radius: 10 })
+          .onChange((value: string) => {
+            this.appBundleNameInput = value;
+            this.appPickerNotice = '';
+          })
+
+        Button() {
+          Text('添加')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(CARD_BACKGROUND)
+        }
+          .type(ButtonType.Normal)
+          .height(44)
+          .padding({ left: 18, right: 18 })
+          .backgroundColor(PRIMARY_BLUE)
+          .borderRadius(10)
+          .margin({ left: 10 })
+          .onClick(() => {
+            this.addSplitAppByBundleName().catch((err: BusinessError) => {
+              this.appPickerNotice = err.message ?? JSON.stringify(err);
+            });
+          })
+      }
+      .width('100%')
+
+      if (this.appPickerNotice.length > 0) {
+        Text(this.appPickerNotice)
+          .fontSize(12)
+          .fontColor(TEXT_SECONDARY)
+          .maxLines(2)
+          .margin({ top: 8 })
+      }
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 16, bottom: 8 })
+  }
+
+  @Builder
+  private buildAppPickerRow(app: SplitAppInfo) {
+    Row() {
+      Row() {
+        Text(this.appInitial(app))
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(PRIMARY_BLUE)
+          .textAlign(TextAlign.Center)
+      }
+      .width(46)
+      .height(46)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor('#EEF5FF')
+      .borderRadius(12)
+      .margin({ right: 14 })
+
+      Column() {
+        Text(app.label)
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(TEXT_PRIMARY)
+          .maxLines(1)
+        Text(app.bundleName)
+          .fontSize(12)
+          .fontColor(TEXT_SECONDARY)
+          .maxLines(1)
+          .margin({ top: 5 })
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Stack() {
+        Circle()
+          .width(26)
+          .height(26)
+          .fill(this.isDraftAppSelected(app.bundleName) ? PRIMARY_BLUE : '#FFFFFF')
+          .stroke(this.isDraftAppSelected(app.bundleName) ? PRIMARY_BLUE : '#CBD5E1')
+        if (this.isDraftAppSelected(app.bundleName)) {
+          Text('✓')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+        }
+      }
+      .width(30)
+      .height(30)
+    }
+    .width('100%')
+    .height(72)
+    .padding({ left: 16, right: 16 })
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(12)
+    .onClick(() => {
+      this.toggleDraftSplitApp(app.bundleName);
+    })
+  }
+
+  @Builder
   private buildRulesPage() {
     Scroll() {
       Column() {
@@ -672,27 +973,44 @@ struct Index {
           this.buildRuleSwitchFace('appSplit');
         }
         .onClick(() => {
-          this.appSplitEnabled = !this.appSplitEnabled;
+          this.toggleAppSplit().catch((err: BusinessError) => {
+            this.statusText = err.message ?? JSON.stringify(err);
+          });
         })
       }
       .width('100%')
 
-      Row() {
-        Image($r('app.media.ic_list_check_blue'))
-          .width(24)
-          .height(24)
-          .margin({ right: 12 })
-        Text('已选 ' + String(this.selectedAppCount) + ' 个应用')
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(TEXT_PRIMARY)
-          .maxLines(1)
+      if (this.appSplitEnabled) {
+        Row() {
+          Button() {
+            Row() {
+              Image($r('app.media.ic_list_check_blue'))
+                .width(22)
+                .height(22)
+                .margin({ right: 10 })
+              Text('已选 ' + String(this.selectedSplitApps.length) + ' 个应用')
+                .fontSize(15)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(TEXT_PRIMARY)
+                .maxLines(1)
+            }
+            .alignItems(VerticalAlign.Center)
+          }
+            .type(ButtonType.Normal)
+            .height(50)
+            .padding({ left: 18, right: 18 })
+            .backgroundColor('#00000000')
+            .border({ width: 1, color: '#E4E7EC', radius: 12 })
+            .onClick(() => {
+              this.openAppPicker().catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            })
+        }
+        .width('100%')
+        .justifyContent(FlexAlign.Start)
+        .margin({ top: 24 })
       }
-      .height(50)
-      .padding({ left: 18, right: 18 })
-      .alignItems(VerticalAlign.Center)
-      .border({ width: 1, color: '#E4E7EC', radius: 12 })
-      .margin({ top: 24 })
     }
     .width('100%')
     .padding({ left: 22, right: 22, top: 24, bottom: 24 })
@@ -1378,6 +1696,264 @@ struct Index {
     this.editingConfig = DEFAULT_WG_CONFIG;
   }
 
+  private closeAppPicker(): void {
+    this.appPickerOpen = false;
+    this.appPickerLoading = false;
+    this.appPickerError = '';
+    this.appBundleNameInput = '';
+    this.appPickerNotice = '';
+    this.availableSplitApps = [];
+    this.draftSelectedBundleNames = [];
+  }
+
+  private async loadAppSplitSettings(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      this.appSplitEnabled = await loadAppSplitEnabled(context, true);
+      this.selectedSplitApps = await loadSelectedSplitApps(context, true);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load app split settings failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
+  private async toggleAppSplit(): Promise<void> {
+    const nextEnabled = !this.appSplitEnabled;
+    this.appSplitEnabled = nextEnabled;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      await saveAppSplitEnabled(context, nextEnabled);
+      await this.restartVpnIfRunning('app split toggle');
+    } catch (err) {
+      const error = err as BusinessError;
+      this.statusText = error.message ?? JSON.stringify(err);
+    }
+  }
+
+  private async openAppPicker(): Promise<void> {
+    if (!this.appSplitEnabled) {
+      return;
+    }
+
+    this.appPickerOpen = true;
+    this.draftSelectedBundleNames = this.bundleNamesForApps(this.selectedSplitApps);
+    await this.loadAvailableSplitApps();
+  }
+
+  private async loadAvailableSplitApps(): Promise<void> {
+    this.appPickerLoading = true;
+    this.appPickerError = '';
+    try {
+      const apps = await this.queryInstalledBrowsers();
+      this.availableSplitApps = this.mergeSelectedSplitApps(apps);
+      hilog.info(DOMAIN, TAG, 'loaded split app candidates count=%{public}d', this.availableSplitApps.length);
+    } catch (err) {
+      const error = err as BusinessError;
+      this.availableSplitApps = this.selectedSplitApps;
+      this.appPickerError = error.message ?? JSON.stringify(err);
+    } finally {
+      this.appPickerLoading = false;
+    }
+  }
+
+  private async queryInstalledBrowsers(): Promise<SplitAppInfo[]> {
+    const wantInfo: Want = {
+      action: 'ohos.want.action.viewData',
+      entities: ['entity.system.browsable'],
+      uri: 'https://'
+    };
+
+    const abilities: bundle.AbilityInfo[] = await bundle.queryAbilityByWant(
+      wantInfo,
+      bundle.BundleFlag.GET_BUNDLE_DEFAULT
+    );
+    const apps: SplitAppInfo[] = [];
+    const seenBundleNames: string[] = [];
+
+    for (let index = 0; index < abilities.length; index++) {
+      const bundleName = abilities[index].bundleName;
+      if (bundleName.length === 0 || bundleName === BUNDLE_NAME || this.hasString(seenBundleNames, bundleName)) {
+        continue;
+      }
+
+      const app: SplitAppInfo = {
+        bundleName: bundleName,
+        label: bundleName
+      };
+      apps.push(app);
+      seenBundleNames.push(bundleName);
+    }
+
+    apps.sort((left: SplitAppInfo, right: SplitAppInfo) => left.label.localeCompare(right.label));
+    return apps;
+  }
+
+  private async addSplitAppByBundleName(): Promise<void> {
+    const bundleName = this.normalizeBundleName(this.appBundleNameInput);
+    if (bundleName.length === 0) {
+      this.appPickerNotice = '请输入应用包名';
+      return;
+    }
+    if (bundleName === BUNDLE_NAME) {
+      this.appPickerNotice = '不能选择当前 VPN 应用';
+      return;
+    }
+    if (this.hasSplitApp(this.availableSplitApps, bundleName)) {
+      this.toggleDraftBundleOn(bundleName);
+      this.appBundleNameInput = '';
+      this.appPickerNotice = '已在列表中';
+      return;
+    }
+
+    const app: SplitAppInfo = {
+      bundleName: bundleName,
+      label: bundleName
+    };
+    this.availableSplitApps = this.appendAndSortSplitApp(this.availableSplitApps, app);
+    this.toggleDraftBundleOn(app.bundleName);
+    this.appBundleNameInput = '';
+    this.appPickerNotice = '已添加 ' + app.bundleName;
+  }
+
+  private appendAndSortSplitApp(apps: SplitAppInfo[], app: SplitAppInfo): SplitAppInfo[] {
+    const nextApps: SplitAppInfo[] = [];
+    let exists = false;
+    for (let index = 0; index < apps.length; index++) {
+      const existing = apps[index];
+      if (existing.bundleName === app.bundleName) {
+        nextApps.push(app);
+        exists = true;
+      } else {
+        nextApps.push(existing);
+      }
+    }
+    if (!exists) {
+      nextApps.push(app);
+    }
+    nextApps.sort((left: SplitAppInfo, right: SplitAppInfo) => left.label.localeCompare(right.label));
+    return nextApps;
+  }
+
+  private hasSplitApp(apps: SplitAppInfo[], bundleName: string): boolean {
+    for (let index = 0; index < apps.length; index++) {
+      if (apps[index].bundleName === bundleName) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private mergeSelectedSplitApps(apps: SplitAppInfo[]): SplitAppInfo[] {
+    const merged: SplitAppInfo[] = [];
+    const bundleNames: string[] = [];
+    for (let index = 0; index < apps.length; index++) {
+      const app = apps[index];
+      merged.push(app);
+      bundleNames.push(app.bundleName);
+    }
+
+    for (let index = 0; index < this.selectedSplitApps.length; index++) {
+      const app = this.selectedSplitApps[index];
+      if (!this.hasString(bundleNames, app.bundleName)) {
+        merged.push(app);
+        bundleNames.push(app.bundleName);
+      }
+    }
+    return merged;
+  }
+
+  private async saveAppPickerSelection(): Promise<void> {
+    const selectedApps: SplitAppInfo[] = [];
+    for (let index = 0; index < this.availableSplitApps.length; index++) {
+      const app = this.availableSplitApps[index];
+      if (this.isDraftAppSelected(app.bundleName)) {
+        selectedApps.push(app);
+      }
+    }
+
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveSelectedSplitApps(context, selectedApps);
+    this.selectedSplitApps = selectedApps;
+    this.closeAppPicker();
+    await this.restartVpnIfRunning('app split apps');
+  }
+
+  private async restartVpnIfRunning(reason: string): Promise<void> {
+    if (!this.runtimeRunning && !this.vpnEnabled) {
+      return;
+    }
+
+    hilog.info(DOMAIN, TAG, 'restart vpn for rule change reason=%{public}s', reason);
+    await vpnExtension.startVpnExtensionAbility(this.buildWant());
+    this.statusText = 'Rules updated';
+  }
+
+  private bundleNamesForApps(apps: SplitAppInfo[]): string[] {
+    const bundleNames: string[] = [];
+    for (let index = 0; index < apps.length; index++) {
+      bundleNames.push(apps[index].bundleName);
+    }
+    return bundleNames;
+  }
+
+  private isDraftAppSelected(bundleName: string): boolean {
+    return this.hasString(this.draftSelectedBundleNames, bundleName);
+  }
+
+  private toggleDraftSplitApp(bundleName: string): void {
+    const nextBundleNames: string[] = [];
+    let removed = false;
+    for (let index = 0; index < this.draftSelectedBundleNames.length; index++) {
+      const value = this.draftSelectedBundleNames[index];
+      if (value === bundleName) {
+        removed = true;
+      } else {
+        nextBundleNames.push(value);
+      }
+    }
+
+    if (!removed) {
+      nextBundleNames.push(bundleName);
+    }
+    this.draftSelectedBundleNames = nextBundleNames;
+  }
+
+  private toggleDraftBundleOn(bundleName: string): void {
+    if (this.hasString(this.draftSelectedBundleNames, bundleName)) {
+      return;
+    }
+
+    const nextBundleNames: string[] = [];
+    for (let index = 0; index < this.draftSelectedBundleNames.length; index++) {
+      nextBundleNames.push(this.draftSelectedBundleNames[index]);
+    }
+    nextBundleNames.push(bundleName);
+    this.draftSelectedBundleNames = nextBundleNames;
+  }
+
+  private normalizeBundleName(value: string): string {
+    return value.trim();
+  }
+
+  private hasString(values: string[], value: string): boolean {
+    for (let index = 0; index < values.length; index++) {
+      if (values[index] === value) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private appInitial(app: SplitAppInfo): string {
+    if (app.label.length > 0) {
+      return app.label.substring(0, 1);
+    }
+    if (app.bundleName.length > 0) {
+      return app.bundleName.substring(0, 1).toUpperCase();
+    }
+    return '?';
+  }
+
   private async saveEditingTunnel(): Promise<void> {
     if (this.editingTunnelId.length === 0) {
       return;
@@ -1495,8 +2071,9 @@ struct Index {
 
     await saveActiveTunnel(context, tunnel);
     hilog.info(DOMAIN, TAG, 'active tunnel saved id=%{public}s name=%{public}s', tunnel.id, tunnel.name);
-    await vpnExtension.startVpnExtensionAbility(this.buildWant());
     await saveTunnelRuntimeStatus(context, this.buildPendingRuntimeStatus(tunnel));
+    await vpnExtension.startVpnExtensionAbility(this.buildWant());
+    const continuousTaskStarted = await this.ensureVpnContinuousTask(context, switching ? 'switch tunnel' : 'start tunnel');
     this.vpnEnabled = true;
     this.activeTunnelId = tunnel.id;
     this.runtimeRunning = true;
@@ -1508,7 +2085,9 @@ struct Index {
     this.runtimeLatestPacketSentSeconds = -1;
     this.runtimeRttMillis = -1;
     this.runtimeUpdatedAt = Date.now();
-    if (switching) {
+    if (!continuousTaskStarted) {
+      this.statusText = 'Enabled, background task failed';
+    } else if (switching) {
       this.statusText = notificationEnabled ? 'Switched: ' + tunnel.name : 'Switched, notification disabled';
     } else {
       this.statusText = notificationEnabled ? 'Enabled: ' + tunnel.name : 'Enabled, notification disabled';
@@ -1527,6 +2106,7 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'stop active vpn requested activeId=%{public}s runtimeRunning=%{public}s', this.activeTunnelId, String(this.runtimeRunning));
     const context = getContext(this) as common.UIAbilityContext;
     await vpnExtension.stopVpnExtensionAbility(this.buildWant());
+    await this.stopVpnContinuousTask(context, 'stop vpn');
     await clearActiveTunnel(context);
     await saveTunnelRuntimeStatus(context, this.buildStoppedRuntimeStatus());
     this.vpnEnabled = false;
@@ -1543,6 +2123,57 @@ struct Index {
     this.clearRequestedRuntimeTunnel();
     this.statusText = 'Stopped';
     hilog.info(DOMAIN, TAG, 'stop active vpn finished');
+  }
+
+  private async ensureVpnContinuousTask(context: common.UIAbilityContext, reason: string): Promise<boolean> {
+    if (this.continuousTaskRunning) {
+      return true;
+    }
+
+    const now = Date.now();
+    if (this.continuousTaskStartFailedAt > 0 && now - this.continuousTaskStartFailedAt < CONTINUOUS_TASK_RETRY_MS) {
+      return false;
+    }
+
+    try {
+      await startVpnDataTransferTask(context);
+      this.continuousTaskRunning = true;
+      this.continuousTaskStartFailedAt = 0;
+      hilog.info(DOMAIN, TAG, 'continuous task started reason=%{public}s', reason);
+      return true;
+    } catch (err) {
+      const error = err as BusinessError;
+      this.continuousTaskStartFailedAt = Date.now();
+      hilog.warn(
+        DOMAIN,
+        TAG,
+        'start continuous task failed reason=%{public}s code=%{public}d message=%{public}s',
+        reason,
+        error.code,
+        error.message ?? JSON.stringify(err)
+      );
+      return false;
+    }
+  }
+
+  private async stopVpnContinuousTask(context: common.UIAbilityContext, reason: string): Promise<void> {
+    try {
+      await stopVpnDataTransferTask(context);
+      hilog.info(DOMAIN, TAG, 'continuous task stopped reason=%{public}s', reason);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(
+        DOMAIN,
+        TAG,
+        'stop continuous task failed reason=%{public}s code=%{public}d message=%{public}s',
+        reason,
+        error.code,
+        error.message ?? JSON.stringify(err)
+      );
+    } finally {
+      this.continuousTaskRunning = false;
+      this.continuousTaskStartFailedAt = 0;
+    }
   }
 
   private async deleteTunnelById(tunnelId: string): Promise<void> {
@@ -1694,6 +2325,9 @@ struct Index {
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
       if (running) {
+        await this.ensureVpnContinuousTask(context, 'runtime refresh');
+      }
+      if (running) {
         this.closeTunnelSwipe();
         this.startingTunnelId = resolvedTunnelId;
         this.startingTunnelName = resolvedTunnelName;
@@ -1702,6 +2336,7 @@ struct Index {
       }
 
       if (wasRunning && !running && !this.busy) {
+        await this.stopVpnContinuousTask(context, 'runtime stopped');
         this.statusText = 'Stopped';
         hilog.info(DOMAIN, TAG, 'runtime transitioned to stopped');
       }

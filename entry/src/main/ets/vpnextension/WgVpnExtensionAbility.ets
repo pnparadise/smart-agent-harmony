@@ -1,13 +1,15 @@
 import { common, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
-import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   ActiveTunnelInfo,
+  loadAppSplitEnabled,
   loadActiveTunnelInfo,
   loadConfig,
+  loadSelectedSplitApps,
   saveTunnelRuntimeStatus,
+  SplitAppInfo,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
 import {
@@ -23,7 +25,6 @@ import { NativeTunnel } from '../wireguard/NativeTunnel';
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
-const VPN_NOTIFICATION_ID = 1001;
 const STATS_REFRESH_INTERVAL_MS = 1000;
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
 
@@ -142,18 +143,22 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       await this.vpnConnection.protect(socketFd);
       hilog.info(DOMAIN, TAG, 'native socket protected');
 
-      const vpnConfig = this.buildVpnConfig(config);
+      const appSplitEnabled = await loadAppSplitEnabled(this.context as common.VpnExtensionContext, true);
+      const selectedSplitApps = await loadSelectedSplitApps(this.context as common.VpnExtensionContext, true);
+      const vpnConfig = this.buildVpnConfig(config, appSplitEnabled, selectedSplitApps);
       const vpnMtu = vpnConfig.mtu === undefined ? 0 : vpnConfig.mtu;
       hilog.info(
         DOMAIN,
         TAG,
-        'vpn config built, addresses=%{public}d routes=%{public}d dns=%{public}d mtu=%{public}d ipv4=%{public}s ipv6=%{public}s',
+        'vpn config built, addresses=%{public}d routes=%{public}d dns=%{public}d mtu=%{public}d ipv4=%{public}s ipv6=%{public}s appSplit=%{public}s trustedApps=%{public}d',
         vpnConfig.addresses.length,
         vpnConfig.routes === undefined ? 0 : vpnConfig.routes.length,
         vpnConfig.dnsAddresses === undefined ? 0 : vpnConfig.dnsAddresses.length,
         vpnMtu,
         String(vpnConfig.isIPv4Accepted),
-        String(vpnConfig.isIPv6Accepted)
+        String(vpnConfig.isIPv6Accepted),
+        String(appSplitEnabled),
+        selectedSplitApps.length
       );
       this.logVpnConfigDetails(vpnConfig);
 
@@ -172,7 +177,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       this.publishRuntimeStatus(true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
-      await this.publishEnabledNotification();
     } catch (err) {
       const error = err as BusinessError;
       hilog.error(DOMAIN, TAG, 'start stage failed: %{public}s', this.formatError(error));
@@ -180,50 +184,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       throw new Error('Failed to start WireGuard tunnel: ' + this.formatError(error));
     }
     hilog.info(DOMAIN, TAG, 'WireGuard tunnel started');
-  }
-
-  private async publishEnabledNotification(): Promise<void> {
-    try {
-      await notificationManager.addSlot(notificationManager.SlotType.SERVICE_INFORMATION);
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'add notification slot failed: %{public}s', this.formatError(error));
-    }
-
-    const normalContent: notificationManager.NotificationBasicContent = {
-      title: 'Smarty',
-      text: 'VPN 已启用',
-      additionalText: 'WireGuard tunnel is running'
-    };
-    const content: notificationManager.NotificationContent = {
-      notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-      normal: normalContent
-    };
-    const request: notificationManager.NotificationRequest = {
-      id: VPN_NOTIFICATION_ID,
-      content: content,
-      notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
-      isOngoing: true,
-      tapDismissed: false,
-      isAlertOnce: true,
-      showDeliveryTime: true
-    };
-
-    try {
-      await notificationManager.publish(request);
-      hilog.info(DOMAIN, TAG, 'vpn enabled notification published');
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'publish notification failed: %{public}s', this.formatError(error));
-    }
-  }
-
-  private cancelEnabledNotification(): void {
-    notificationManager.cancel(VPN_NOTIFICATION_ID).then(() => {
-      hilog.info(DOMAIN, TAG, 'vpn enabled notification canceled');
-    }).catch((err: BusinessError) => {
-      hilog.warn(DOMAIN, TAG, 'cancel notification failed: %{public}s', this.formatError(err));
-    });
   }
 
   private async resolveConfigText(): Promise<string> {
@@ -248,7 +208,11 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     return fallbackInfo;
   }
 
-  private buildVpnConfig(config: WireGuardConfig): vpnExtension.VpnConfig {
+  private buildVpnConfig(
+    config: WireGuardConfig,
+    appSplitEnabled: boolean,
+    selectedSplitApps: SplitAppInfo[]
+  ): vpnExtension.VpnConfig {
     const ipv4Accepted = hasIPv4(config);
     const ipv6Accepted = hasIPv6(config);
     const addresses: vpnExtension.LinkAddress[] = config.iface.addresses.map((value: string) => {
@@ -271,7 +235,24 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       isInternal: false,
       isBlocking: false
     };
+    const trustedApplications = this.splitAppBundleNames(selectedSplitApps);
+    if (appSplitEnabled && trustedApplications.length > 0) {
+      vpnConfig.trustedApplications = trustedApplications;
+    } else if (appSplitEnabled) {
+      hilog.warn(DOMAIN, TAG, 'app split enabled but no selected apps, vpn runs in global mode');
+    }
     return vpnConfig;
+  }
+
+  private splitAppBundleNames(apps: SplitAppInfo[]): string[] {
+    const bundleNames: string[] = [];
+    for (let index = 0; index < apps.length; index++) {
+      const bundleName = apps[index].bundleName;
+      if (bundleName.length > 0) {
+        bundleNames.push(bundleName);
+      }
+    }
+    return bundleNames;
   }
 
   private buildNetAddress(address: string, family: number): connection.NetAddress {
@@ -337,9 +318,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.stopNetworkObserver();
     this.stopStatsPublisher();
     this.lastForceHandshakeAt = 0;
-    if (publishStopped) {
-      this.cancelEnabledNotification();
-    }
 
     if (this.tunnelHandle !== 0) {
       hilog.info(DOMAIN, TAG, 'stopping native tunnel');
