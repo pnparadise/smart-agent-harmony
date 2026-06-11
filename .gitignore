@@ -1,0 +1,17 @@
+.hvigor/
+.idea/
+.preview/
+build/
+dist/
+node_modules/
+oh_modules/
+local.properties
+*.hap
+*.har
+*.hsp
+*.so
+*.dylib
+*.dll
+*.log
+native/**/target/
+native/**/Cargo.lock

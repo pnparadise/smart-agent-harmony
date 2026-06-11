@@ -1,0 +1,10 @@
+{
+  "name": "entry",
+  "modelVersion": "6.1.1",
+  "version": "0.1.0",
+  "description": "WireGuard VPN entry module.",
+  "main": "",
+  "author": "",
+  "license": "BSD-3-Clause",
+  "dependencies": {}
+}

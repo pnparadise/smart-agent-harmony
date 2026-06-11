@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "Smarty"
+    },
+    {
+      "name": "module_desc",
+      "value": "WireGuard VPN module"
+    },
+    {
+      "name": "entry_desc",
+      "value": "WireGuard control surface"
+    }
+  ]
+}

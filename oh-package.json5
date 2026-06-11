@@ -1,0 +1,10 @@
+{
+  "modelVersion": "6.1.1",
+  "name": "wg-agent",
+  "version": "0.1.0",
+  "description": "HarmonyOS WireGuard client powered by Cloudflare BoringTun.",
+  "main": "",
+  "author": "",
+  "license": "BSD-3-Clause",
+  "dependencies": {}
+}
