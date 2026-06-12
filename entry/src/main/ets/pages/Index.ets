@@ -9,12 +9,15 @@ import {
   clearActiveTunnel,
   createTunnelId,
   deleteTunnel,
+  DEFAULT_DOH_PROVIDER,
   loadAppSplitEnabled,
+  loadDohSettings,
   loadSelectedSplitApps,
   loadTunnelRuntimeStatus,
   loadTunnels,
   saveActiveTunnel,
   saveAppSplitEnabled,
+  saveDohSettings,
   saveSelectedSplitApps,
   saveTunnelRuntimeStatus,
   saveTunnel,
@@ -22,7 +25,7 @@ import {
   TunnelConfig,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
-import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
+import { stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 
 const BUNDLE_NAME = 'com.smart.agent';
@@ -40,7 +43,7 @@ const RUNNING_TUNNEL_BACKGROUND = '#EEF1F5';
 const RUNNING_STATUS_COLOR = '#4B5563';
 const STATUS_REFRESH_INTERVAL_MS = 1000;
 const STATUS_STALE_MS = 5000;
-const CONTINUOUS_TASK_RETRY_MS = 30000;
+const STARTUP_GRACE_MS = 15000;
 const STATUS_CARD_RADIUS = 8;
 const PRIMARY_BLUE = '#3478F6';
 const PAGE_BACKGROUND = '#F4F6FA';
@@ -86,12 +89,13 @@ struct Index {
   @State private runtimeUpdatedAt: number = 0;
   @State private startingTunnelId: string = '';
   @State private startingTunnelName: string = '';
+  @State private startingTunnelAt: number = 0;
   @State private currentTabIndex: number = TAB_TUNNELS;
   @State private appSplitEnabled: boolean = false;
   @State private smartAgentEnabled: boolean = false;
   @State private dohEnabled: boolean = true;
   @State private persistentProtectionEnabled: boolean = true;
-  @State private dohProvider: string = 'https://dns.alidns.com/dns-query';
+  @State private dohProvider: string = DEFAULT_DOH_PROVIDER;
   @State private selectedSplitApps: SplitAppInfo[] = [];
   @State private appPickerOpen: boolean = false;
   @State private availableSplitApps: SplitAppInfo[] = [];
@@ -107,13 +111,13 @@ struct Index {
   @State private highlightedTabIndex: number = TAB_TUNNELS;
   private statusRefreshTimer: number = -1;
   private swipeStartDeleteWidth: number = 0;
-  private continuousTaskRunning: boolean = false;
-  private continuousTaskStartFailedAt: number = 0;
+  private runtimeConfirmedRunning: boolean = false;
 
   aboutToAppear(): void {
     hilog.info(DOMAIN, TAG, 'aboutToAppear');
     this.loadTunnelList();
     this.loadAppSplitSettings();
+    this.loadDohSettings();
     this.refreshRuntimeStatus();
     this.startStatusRefresh();
   }
@@ -1075,7 +1079,9 @@ struct Index {
           this.buildRuleSwitchFace('doh');
         }
         .onClick(() => {
-          this.dohEnabled = !this.dohEnabled;
+          this.toggleDohEnabled().catch((err: BusinessError) => {
+            this.statusText = err.message ?? JSON.stringify(err);
+          });
         })
       }
       .width('100%')
@@ -1106,7 +1112,9 @@ struct Index {
       .alignItems(VerticalAlign.Center)
       .border({ width: 1, color: '#E4E7EC', radius: 10 })
       .onClick(() => {
-        this.rotateDohProvider();
+        this.rotateDohProvider().catch((err: BusinessError) => {
+          this.statusText = err.message ?? JSON.stringify(err);
+        });
       })
     }
     .width('100%')
@@ -1717,6 +1725,29 @@ struct Index {
     }
   }
 
+  private async loadDohSettings(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const settings = await loadDohSettings(context, true);
+      this.dohEnabled = settings.enabled;
+      this.dohProvider = settings.provider;
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load doh settings failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
+  private async toggleDohEnabled(): Promise<void> {
+    const nextEnabled = !this.dohEnabled;
+    this.dohEnabled = nextEnabled;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveDohSettings(context, {
+      enabled: nextEnabled,
+      provider: this.dohProvider
+    });
+    await this.restartVpnIfRunning('doh toggle');
+  }
+
   private async toggleAppSplit(): Promise<void> {
     const nextEnabled = !this.appSplitEnabled;
     this.appSplitEnabled = nextEnabled;
@@ -2033,7 +2064,6 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'active tunnel saved id=%{public}s name=%{public}s', tunnel.id, tunnel.name);
     await saveTunnelRuntimeStatus(context, this.buildPendingRuntimeStatus(tunnel));
     await vpnExtension.startVpnExtensionAbility(this.buildWant());
-    const continuousTaskStarted = await this.ensureVpnContinuousTask(context, switching ? 'switch tunnel' : 'start tunnel');
     this.vpnEnabled = true;
     this.activeTunnelId = tunnel.id;
     this.runtimeRunning = true;
@@ -2045,9 +2075,7 @@ struct Index {
     this.runtimeLatestPacketSentSeconds = -1;
     this.runtimeRttMillis = -1;
     this.runtimeUpdatedAt = Date.now();
-    if (!continuousTaskStarted) {
-      this.statusText = 'Enabled, background task failed';
-    } else if (switching) {
+    if (switching) {
       this.statusText = notificationEnabled ? 'Switched: ' + tunnel.name : 'Switched, notification disabled';
     } else {
       this.statusText = notificationEnabled ? 'Enabled: ' + tunnel.name : 'Enabled, notification disabled';
@@ -2080,40 +2108,10 @@ struct Index {
     this.runtimeLatestPacketSentSeconds = -1;
     this.runtimeRttMillis = -1;
     this.runtimeUpdatedAt = Date.now();
+    this.runtimeConfirmedRunning = false;
     this.clearRequestedRuntimeTunnel();
     this.statusText = 'Stopped';
     hilog.info(DOMAIN, TAG, 'stop active vpn finished');
-  }
-
-  private async ensureVpnContinuousTask(context: common.UIAbilityContext, reason: string): Promise<boolean> {
-    if (this.continuousTaskRunning) {
-      return true;
-    }
-
-    const now = Date.now();
-    if (this.continuousTaskStartFailedAt > 0 && now - this.continuousTaskStartFailedAt < CONTINUOUS_TASK_RETRY_MS) {
-      return false;
-    }
-
-    try {
-      await startVpnDataTransferTask(context);
-      this.continuousTaskRunning = true;
-      this.continuousTaskStartFailedAt = 0;
-      hilog.info(DOMAIN, TAG, 'continuous task started reason=%{public}s', reason);
-      return true;
-    } catch (err) {
-      const error = err as BusinessError;
-      this.continuousTaskStartFailedAt = Date.now();
-      hilog.warn(
-        DOMAIN,
-        TAG,
-        'start continuous task failed reason=%{public}s code=%{public}d message=%{public}s',
-        reason,
-        error.code,
-        error.message ?? JSON.stringify(err)
-      );
-      return false;
-    }
   }
 
   private async stopVpnContinuousTask(context: common.UIAbilityContext, reason: string): Promise<void> {
@@ -2130,9 +2128,6 @@ struct Index {
         error.code,
         error.message ?? JSON.stringify(err)
       );
-    } finally {
-      this.continuousTaskRunning = false;
-      this.continuousTaskStartFailedAt = 0;
     }
   }
 
@@ -2168,11 +2163,14 @@ struct Index {
     this.startingTunnelId = tunnel.id;
     this.startingTunnelName = tunnel.name;
     this.runtimeUpdatedAt = Date.now();
+    this.startingTunnelAt = Date.now();
+    this.runtimeConfirmedRunning = false;
   }
 
   private clearRequestedRuntimeTunnel(): void {
     this.startingTunnelId = '';
     this.startingTunnelName = '';
+    this.startingTunnelAt = 0;
   }
 
   private isRuntimeActive(): boolean {
@@ -2249,15 +2247,17 @@ struct Index {
       const status = await loadTunnelRuntimeStatus(context, true);
       const wasRunning = this.runtimeRunning;
       const fresh = this.isRuntimeStatusFresh(status);
-      const running = status.running && fresh;
+      const pendingStart = this.isStartupGraceActive(status);
+      const running = (status.running && fresh) || pendingStart;
       const hasRuntimeStats = running;
 
       hilog.info(
         DOMAIN,
         TAG,
-        'refresh runtime rawRunning=%{public}s fresh=%{public}s showStats=%{public}s statusId=%{public}s statusName=%{public}s activeId=%{public}s updatedAt=%{public}s ageMs=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s',
+        'refresh runtime rawRunning=%{public}s fresh=%{public}s pendingStart=%{public}s showStats=%{public}s statusId=%{public}s statusName=%{public}s activeId=%{public}s updatedAt=%{public}s ageMs=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s',
         String(status.running),
         String(fresh),
+        String(pendingStart),
         String(hasRuntimeStats),
         status.tunnelId,
         status.tunnelName,
@@ -2284,21 +2284,25 @@ struct Index {
       this.runtimeUpdatedAt = status.updatedAt;
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
-      if (running) {
-        await this.ensureVpnContinuousTask(context, 'runtime refresh');
-      }
-      if (running) {
+      if (status.running && fresh) {
+        this.runtimeConfirmedRunning = true;
         this.closeTunnelSwipe();
         this.startingTunnelId = resolvedTunnelId;
         this.startingTunnelName = resolvedTunnelName;
+        this.startingTunnelAt = 0;
+      } else if (running) {
+        this.closeTunnelSwipe();
       } else {
         this.clearRequestedRuntimeTunnel();
       }
 
-      if (wasRunning && !running && !this.busy) {
+      if (wasRunning && !running && !this.busy && this.runtimeConfirmedRunning) {
+        this.runtimeConfirmedRunning = false;
         await this.stopVpnContinuousTask(context, 'runtime stopped');
         this.statusText = 'Stopped';
         hilog.info(DOMAIN, TAG, 'runtime transitioned to stopped');
+      } else if (!running && !this.runtimeConfirmedRunning) {
+        this.statusText = 'Stopped';
       }
     } catch (err) {
       const error = err as BusinessError;
@@ -2314,6 +2318,22 @@ struct Index {
       return false;
     }
     return Date.now() - status.updatedAt <= STATUS_STALE_MS;
+  }
+
+  private isStartupGraceActive(status: TunnelRuntimeStatus): boolean {
+    if (this.startingTunnelId.length === 0 || this.startingTunnelAt <= 0) {
+      return false;
+    }
+    if (Date.now() - this.startingTunnelAt > STARTUP_GRACE_MS) {
+      return false;
+    }
+    if (status.running) {
+      return false;
+    }
+    if (status.tunnelId.length > 0 && status.tunnelId !== this.startingTunnelId) {
+      return false;
+    }
+    return true;
   }
 
   private runtimeStatusAge(status: TunnelRuntimeStatus): number {
@@ -2496,7 +2516,7 @@ struct Index {
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   }
 
-  private rotateDohProvider(): void {
+  private async rotateDohProvider(): Promise<void> {
     if (this.dohProvider === 'https://dns.alidns.com/dns-query') {
       this.dohProvider = 'https://cloudflare-dns.com/dns-query';
     } else if (this.dohProvider === 'https://cloudflare-dns.com/dns-query') {
@@ -2504,6 +2524,12 @@ struct Index {
     } else {
       this.dohProvider = 'https://dns.alidns.com/dns-query';
     }
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveDohSettings(context, {
+      enabled: this.dohEnabled,
+      provider: this.dohProvider
+    });
+    await this.restartVpnIfRunning('doh provider');
   }
 
   private buildStoppedRuntimeStatus(): TunnelRuntimeStatus {

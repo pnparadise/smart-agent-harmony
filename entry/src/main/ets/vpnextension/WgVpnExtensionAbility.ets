@@ -21,6 +21,7 @@ import {
   WireGuardConfig
 } from '../wireguard/WireGuardConfig';
 import { NativeTunnel } from '../wireguard/NativeTunnel';
+import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
@@ -37,6 +38,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private activeTunnelName: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
+  private backgroundTaskRunning: boolean = false;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
@@ -93,6 +95,8 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   private async startWireGuard(): Promise<void> {
     hilog.info(DOMAIN, TAG, 'startWireGuard begin');
+    await this.startBackgroundProtection();
+
     const activeInfo = await this.resolveActiveTunnelInfo();
     this.activeTunnelId = activeInfo.id;
     this.activeTunnelName = activeInfo.name;
@@ -133,7 +137,16 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.vpnConnection = vpnExtension.createVpnConnection(this.context);
     hilog.info(DOMAIN, TAG, 'vpn connection created');
 
-    this.tunnelHandle = NativeTunnel.create(config);
+    const endpointHost = await this.resolveEndpointHost(config.peer.endpointHost);
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'endpoint resolved original=%{public}s selected=%{public}s',
+      config.peer.endpointHost,
+      endpointHost
+    );
+
+    this.tunnelHandle = NativeTunnel.create(config, endpointHost);
     hilog.info(DOMAIN, TAG, 'native tunnel created, handle=%{public}d', this.tunnelHandle);
 
     try {
@@ -206,6 +219,47 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     };
     hilog.warn(DOMAIN, TAG, 'active tunnel config empty, fallback configBytes=%{public}d', fallbackConfig.length);
     return fallbackInfo;
+  }
+
+  private async resolveEndpointHost(host: string): Promise<string> {
+    const normalized = host.trim();
+    if (this.isIpAddress(normalized)) {
+      return normalized;
+    }
+
+    const addresses = await connection.getAddressesByName(normalized);
+    if (addresses.length === 0) {
+      throw new Error('endpoint did not resolve: ' + normalized);
+    }
+
+    for (let index = 0; index < addresses.length; index++) {
+      const address = addresses[index].address;
+      if (address.length > 0 && address.indexOf(':') < 0) {
+        return address;
+      }
+    }
+    return addresses[0].address;
+  }
+
+  private isIpAddress(value: string): boolean {
+    if (value.indexOf(':') >= 0) {
+      return true;
+    }
+    const parts = value.split('.');
+    if (parts.length !== 4) {
+      return false;
+    }
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index];
+      if (part.length === 0 || part.length > 3) {
+        return false;
+      }
+      const parsed = Number(part);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private buildVpnConfig(
@@ -338,7 +392,35 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         hilog.error(DOMAIN, TAG, 'destroy failed: %{public}s', this.formatError(err));
       });
     }
+
+    await this.stopBackgroundProtection();
     hilog.info(DOMAIN, TAG, 'cleanup end');
+  }
+
+  private async startBackgroundProtection(): Promise<void> {
+    if (this.backgroundTaskRunning) {
+      return;
+    }
+
+    hilog.info(DOMAIN, TAG, 'starting background protection before vpn/native init');
+    try {
+      await startVpnDataTransferTask(this.context as common.VpnExtensionContext);
+      this.backgroundTaskRunning = true;
+      hilog.info(DOMAIN, TAG, 'background protection active');
+    } catch (err) {
+      const error = err as BusinessError;
+      this.backgroundTaskRunning = false;
+      hilog.warn(DOMAIN, TAG, 'background protection unavailable, continue vpn start: %{public}s', this.formatError(error));
+    }
+  }
+
+  private async stopBackgroundProtection(): Promise<void> {
+    const hadBackgroundTask = this.backgroundTaskRunning;
+    this.backgroundTaskRunning = false;
+    await stopVpnDataTransferTask(this.context as common.VpnExtensionContext);
+    if (!hadBackgroundTask) {
+      hilog.info(DOMAIN, TAG, 'background protection cleanup requested without active continuous task');
+    }
   }
 
   private startStatsPublisher(): void {

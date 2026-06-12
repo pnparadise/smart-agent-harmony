@@ -19,7 +19,7 @@ const DEFAULT_MTU: usize = 1280;
 const MAX_MTU: usize = 1500;
 const HANDSHAKE_INDEX: u32 = 1;
 const UDP_POLL_MS: u64 = 250;
-const TUN_POLL_MS: u64 = 250;
+const TUN_POLL_MS: i32 = 1000;
 const TIMER_POLL_MS: u64 = 1000;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -282,17 +282,22 @@ impl TunnelRuntime {
         let mut out = vec![0u8; self.mtu + 512];
 
         while self.running.load(Ordering::SeqCst) {
+            match poll_readable(tun_fd.as_raw_fd(), TUN_POLL_MS) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) if is_retry(&err) => continue,
+                Err(_) => break,
+            }
+
             match read_fd(tun_fd.as_raw_fd(), &mut packet) {
-                Ok(0) => thread::sleep(Duration::from_millis(TUN_POLL_MS)),
+                Ok(0) => continue,
                 Ok(size) => {
                     if let Ok(mut tunn) = self.lock_tunn() {
                         let result = tunn.encapsulate(&packet[..size], &mut out);
                         self.handle_tunn_result(result, &socket, None);
                     }
                 }
-                Err(err) if is_retry(&err) => {
-                    thread::sleep(Duration::from_millis(TUN_POLL_MS));
-                }
+                Err(err) if is_retry(&err) => continue,
                 Err(_) => break,
             }
         }
@@ -504,6 +509,28 @@ fn read_fd(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
     } else {
         Ok(result as usize)
     }
+}
+
+fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if result == 0 {
+        return Ok(false);
+    }
+    if poll_fd.revents & libc::POLLIN != 0 {
+        return Ok(true);
+    }
+    if poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(false)
 }
 
 fn write_all_fd(fd: RawFd, mut data: &[u8]) -> io::Result<()> {

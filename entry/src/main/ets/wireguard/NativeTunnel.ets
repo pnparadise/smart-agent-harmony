@@ -12,12 +12,12 @@ export interface TunnelStats {
 }
 
 export class NativeTunnel {
-  static create(config: WireGuardConfig): number {
+  static create(config: WireGuardConfig, endpointHost?: string): number {
     return wgNative.createTunnel(
       config.iface.privateKey,
       config.peer.publicKey,
       config.peer.presharedKey,
-      config.peer.endpointHost,
+      endpointHost ?? config.peer.endpointHost,
       config.peer.endpointPort,
       config.peer.persistentKeepalive,
       config.iface.mtu

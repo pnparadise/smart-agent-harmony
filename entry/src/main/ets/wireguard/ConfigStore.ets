@@ -54,6 +54,14 @@ const STATUS_RTT_KEY = 'wg_status_rtt_millis';
 const STATUS_UPDATED_AT_KEY = 'wg_status_updated_at';
 const APP_SPLIT_ENABLED_KEY = 'wg_app_split_enabled';
 const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
+const DOH_ENABLED_KEY = 'wg_doh_enabled';
+const DOH_PROVIDER_KEY = 'wg_doh_provider';
+export const DEFAULT_DOH_PROVIDER = 'https://dns.alidns.com/dns-query';
+
+export interface DohSettings {
+  enabled: boolean;
+  provider: string;
+}
 
 type StoreContext = common.UIAbilityContext | common.VpnExtensionContext;
 
@@ -258,6 +266,45 @@ export async function loadSelectedSplitApps(
   return apps;
 }
 
+export async function saveDohSettings(context: StoreContext, settings: DohSettings): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  await store.put(DOH_ENABLED_KEY, settings.enabled);
+  await store.put(DOH_PROVIDER_KEY, normalizeDohProvider(settings.provider));
+  await store.flush();
+  hilog.info(
+    DOMAIN,
+    TAG,
+    'save doh settings enabled=%{public}s provider=%{public}s',
+    String(settings.enabled),
+    normalizeDohProvider(settings.provider)
+  );
+}
+
+export async function loadDohSettings(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<DohSettings> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const enabled = await store.get(DOH_ENABLED_KEY, true) as boolean;
+  const provider = normalizeDohProvider(await store.get(DOH_PROVIDER_KEY, DEFAULT_DOH_PROVIDER) as string);
+  const settings: DohSettings = {
+    enabled: enabled,
+    provider: provider
+  };
+  hilog.info(
+    DOMAIN,
+    TAG,
+    'load doh settings enabled=%{public}s provider=%{public}s',
+    String(settings.enabled),
+    settings.provider
+  );
+  return settings;
+}
+
 async function removeStoreFromCache(context: StoreContext): Promise<void> {
   try {
     await preferences.removePreferencesFromCache(context, STORE_NAME);
@@ -265,6 +312,14 @@ async function removeStoreFromCache(context: StoreContext): Promise<void> {
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'remove preferences cache failed: %{public}s', formatUnknownError(err));
   }
+}
+
+function normalizeDohProvider(value: string): string {
+  const provider = value.trim();
+  if (provider.length === 0) {
+    return DEFAULT_DOH_PROVIDER;
+  }
+  return provider;
 }
 
 export function createTunnelId(): string {
