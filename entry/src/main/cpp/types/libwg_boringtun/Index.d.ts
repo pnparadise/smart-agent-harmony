@@ -26,4 +26,10 @@ export const stopTunnel: (handle: number) => void;
 
 export const getTunnelStats: (handle: number) => NativeTunnelStats;
 
+export const getTickCount: () => number;
+
+export const getTunnelTickCount: (handle: number) => number;
+
+export const getPersistentKeepaliveSeconds: (handle: number) => number;
+
 export const forceTunnelHandshake: (handle: number) => void;

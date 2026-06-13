@@ -169,20 +169,6 @@ export async function saveTunnelRuntimeStatus(context: StoreContext, status: Tun
   await store.put(STATUS_RTT_KEY, rttMillis);
   await store.put(STATUS_UPDATED_AT_KEY, updatedAt);
   await store.flush();
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'save runtime status running=%{public}s id=%{public}s name=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s updatedAt=%{public}s',
-    String(running),
-    tunnelId,
-    tunnelName,
-    String(txBytes),
-    String(rxBytes),
-    String(latestHandshakeSeconds),
-    String(latestPacketSentSeconds),
-    String(rttMillis),
-    String(updatedAt)
-  );
 }
 
 export async function loadTunnelRuntimeStatus(
@@ -206,20 +192,6 @@ export async function loadTunnelRuntimeStatus(
     rttMillis: await store.get(STATUS_RTT_KEY, -1) as number,
     updatedAt: await store.get(STATUS_UPDATED_AT_KEY, 0) as number
   };
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'load runtime status running=%{public}s id=%{public}s name=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s updatedAt=%{public}s',
-    String(status.running),
-    status.tunnelId,
-    status.tunnelName,
-    String(status.txBytes),
-    String(status.rxBytes),
-    String(status.latestHandshakeSeconds),
-    String(status.latestPacketSentSeconds),
-    String(status.rttMillis),
-    String(status.updatedAt)
-  );
   return status;
 }
 

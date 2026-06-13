@@ -26,14 +26,13 @@ import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
-const STATS_REFRESH_INTERVAL_MS = 1000;
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
+const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
 
 export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private vpnConnection?: vpnExtension.VpnConnection;
   private netConnection?: connection.NetConnection;
   private tunnelHandle: number = 0;
-  private statsTimer: number = -1;
   private activeTunnelId: string = '';
   private activeTunnelName: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
@@ -42,6 +41,13 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
+    if (this.isRefreshStatusWant(want)) {
+      this.publishRuntimeStatus(false, false).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'publish refresh status on create failed: %{public}s', this.formatError(err));
+      });
+      return;
+    }
+
     this.restartWireGuard('onCreate', false).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'start failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
@@ -52,6 +58,13 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   onRequest(want: Want, startId: number): void {
     hilog.info(DOMAIN, TAG, 'onRequest startId=%{public}d ability=%{public}s', startId, want.abilityName ?? '');
+    if (this.isRefreshStatusWant(want)) {
+      this.publishRuntimeStatus(this.tunnelHandle !== 0, true).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'publish requested runtime status failed: %{public}s', this.formatError(err));
+      });
+      return;
+    }
+
     this.restartWireGuard('onRequest', true).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'restart failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
@@ -181,13 +194,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       NativeTunnel.start(this.tunnelHandle, tunFd);
       hilog.info(DOMAIN, TAG, 'native tunnel started');
       this.startNetworkObserver();
-      try {
-        this.startStatsPublisher();
-      } catch (err) {
-        const error = err as BusinessError;
-        hilog.warn(DOMAIN, TAG, 'start stats publisher failed: %{public}s', this.formatError(error));
-      }
-      this.publishRuntimeStatus(true).catch((err: BusinessError) => {
+      this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
     } catch (err) {
@@ -370,7 +377,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       String(publishStopped)
     );
     this.stopNetworkObserver();
-    this.stopStatsPublisher();
     this.lastForceHandshakeAt = 0;
 
     if (this.tunnelHandle !== 0) {
@@ -380,7 +386,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     if (publishStopped) {
-      this.publishRuntimeStatus(false).catch((err: BusinessError) => {
+      this.publishRuntimeStatus(false, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish stopped status failed: %{public}s', this.formatError(err));
       });
     }
@@ -420,24 +426,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     await stopVpnDataTransferTask(this.context as common.VpnExtensionContext);
     if (!hadBackgroundTask) {
       hilog.info(DOMAIN, TAG, 'background protection cleanup requested without active continuous task');
-    }
-  }
-
-  private startStatsPublisher(): void {
-    this.stopStatsPublisher();
-    hilog.info(DOMAIN, TAG, 'start stats publisher interval=%{public}d', STATS_REFRESH_INTERVAL_MS);
-    this.statsTimer = setInterval(() => {
-      this.publishRuntimeStatus(true).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'publish runtime status failed: %{public}s', this.formatError(err));
-      });
-    }, STATS_REFRESH_INTERVAL_MS);
-  }
-
-  private stopStatsPublisher(): void {
-    if (this.statsTimer >= 0) {
-      clearInterval(this.statsTimer);
-      this.statsTimer = -1;
-      hilog.info(DOMAIN, TAG, 'stop stats publisher');
     }
   }
 
@@ -516,14 +504,14 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
-  private async publishRuntimeStatus(running: boolean): Promise<void> {
+  private async publishRuntimeStatus(running: boolean, includeStats: boolean): Promise<void> {
     let txBytes = 0;
     let rxBytes = 0;
     let latestHandshakeSeconds = -1;
     let latestPacketSentSeconds = -1;
     let loss = 0;
     let rttMillis = -1;
-    if (running && this.tunnelHandle !== 0) {
+    if (running && includeStats && this.tunnelHandle !== 0) {
       try {
         const stats = NativeTunnel.stats(this.tunnelHandle);
         txBytes = stats.txBytes;
@@ -550,21 +538,15 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       rttMillis: rttMillis,
       updatedAt: Date.now()
     };
-    hilog.info(
-      DOMAIN,
-      TAG,
-      'publish runtime status running=%{public}s id=%{public}s name=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s updatedAt=%{public}s',
-      String(status.running),
-      status.tunnelId,
-      status.tunnelName,
-      String(status.txBytes),
-      String(status.rxBytes),
-      String(status.latestHandshakeSeconds),
-      String(status.latestPacketSentSeconds),
-      String(status.rttMillis),
-      String(status.updatedAt)
-    );
     await saveTunnelRuntimeStatus(this.context as common.VpnExtensionContext, status);
+  }
+
+  private isRefreshStatusWant(want: Want): boolean {
+    const parameters = want.parameters;
+    if (parameters === undefined) {
+      return false;
+    }
+    return parameters.action === WANT_ACTION_REFRESH_STATUS;
   }
 
   private formatError(error: BusinessError): string {

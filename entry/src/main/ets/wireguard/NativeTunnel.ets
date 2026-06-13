@@ -40,6 +40,18 @@ export class NativeTunnel {
     wgNative.forceTunnelHandshake(handle);
   }
 
+  static tickCount(): number {
+    return wgNative.getTickCount();
+  }
+
+  static tunnelTickCount(handle: number): number {
+    return wgNative.getTunnelTickCount(handle);
+  }
+
+  static persistentKeepaliveSeconds(handle: number): number {
+    return wgNative.getPersistentKeepaliveSeconds(handle);
+  }
+
   static stats(handle: number): TunnelStats {
     const stats: NativeTunnelStats = wgNative.getTunnelStats(handle);
     const tunnelStats: TunnelStats = {

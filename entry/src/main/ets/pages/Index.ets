@@ -31,6 +31,7 @@ import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardC
 const BUNDLE_NAME = 'com.smart.agent';
 const MODULE_NAME = 'entry';
 const VPN_ABILITY = 'WgVpnExtensionAbility';
+const VPN_ACTION_REFRESH_STATUS = 'refreshStatus';
 const CONFIG_FILE_SUFFIX_FILTERS: string[] = ['WireGuard|.conf,.txt'];
 const MAX_IMPORT_CONFIG_BYTES = 64 * 1024;
 const TUNNEL_ROW_HEIGHT = 76;
@@ -41,8 +42,7 @@ const ACTION_BUTTON_BACKGROUND = '#EEF5FF';
 const STOP_BUTTON_BACKGROUND = '#FDECEC';
 const RUNNING_TUNNEL_BACKGROUND = '#EEF1F5';
 const RUNNING_STATUS_COLOR = '#4B5563';
-const STATUS_REFRESH_INTERVAL_MS = 1000;
-const STATUS_STALE_MS = 5000;
+const STATUS_REFRESH_INTERVAL_MS = 5000;
 const STARTUP_GRACE_MS = 15000;
 const STATUS_CARD_RADIUS = 8;
 const PRIMARY_BLUE = '#3478F6';
@@ -2244,32 +2244,17 @@ struct Index {
   private async refreshRuntimeStatus(): Promise<void> {
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const status = await loadTunnelRuntimeStatus(context, true);
-      const wasRunning = this.runtimeRunning;
-      const fresh = this.isRuntimeStatusFresh(status);
-      const pendingStart = this.isStartupGraceActive(status);
-      const running = (status.running && fresh) || pendingStart;
-      const hasRuntimeStats = running;
+      let status = await loadTunnelRuntimeStatus(context, true);
+      if (status.running || this.runtimeRunning || this.vpnEnabled) {
+        await this.requestRuntimeStatusRefresh();
+        await this.sleep(150);
+        status = await loadTunnelRuntimeStatus(context, true);
+      }
 
-      hilog.info(
-        DOMAIN,
-        TAG,
-        'refresh runtime rawRunning=%{public}s fresh=%{public}s pendingStart=%{public}s showStats=%{public}s statusId=%{public}s statusName=%{public}s activeId=%{public}s updatedAt=%{public}s ageMs=%{public}s tx=%{public}s rx=%{public}s handshake=%{public}s packetSent=%{public}s rtt=%{public}s',
-        String(status.running),
-        String(fresh),
-        String(pendingStart),
-        String(hasRuntimeStats),
-        status.tunnelId,
-        status.tunnelName,
-        this.activeTunnelId,
-        String(status.updatedAt),
-        String(this.runtimeStatusAge(status)),
-        String(status.txBytes),
-        String(status.rxBytes),
-        String(status.latestHandshakeSeconds),
-        String(status.latestPacketSentSeconds),
-        String(status.rttMillis)
-      );
+      const wasRunning = this.runtimeRunning;
+      const pendingStart = this.isStartupGraceActive(status);
+      const running = status.running || pendingStart;
+      const hasRuntimeStats = running;
 
       const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status) : '';
       const resolvedTunnelName = running ? this.resolveRuntimeTunnelName(status, resolvedTunnelId) : '';
@@ -2284,7 +2269,7 @@ struct Index {
       this.runtimeUpdatedAt = status.updatedAt;
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
-      if (status.running && fresh) {
+      if (status.running) {
         this.runtimeConfirmedRunning = true;
         this.closeTunnelSwipe();
         this.startingTunnelId = resolvedTunnelId;
@@ -2311,13 +2296,6 @@ struct Index {
         this.statusText = error.message ?? JSON.stringify(err);
       }
     }
-  }
-
-  private isRuntimeStatusFresh(status: TunnelRuntimeStatus): boolean {
-    if (status.updatedAt <= 0) {
-      return false;
-    }
-    return Date.now() - status.updatedAt <= STATUS_STALE_MS;
   }
 
   private isStartupGraceActive(status: TunnelRuntimeStatus): boolean {
@@ -2638,5 +2616,30 @@ struct Index {
       abilityName: VPN_ABILITY
     };
     return want;
+  }
+
+  private buildRefreshStatusWant(): Want {
+    const want = this.buildWant();
+    want.parameters = {
+      action: VPN_ACTION_REFRESH_STATUS
+    };
+    return want;
+  }
+
+  private async requestRuntimeStatusRefresh(): Promise<void> {
+    try {
+      await vpnExtension.startVpnExtensionAbility(this.buildRefreshStatusWant());
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'request runtime status refresh failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
+  private sleep(durationMs: number): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, durationMs);
+    });
   }
 }

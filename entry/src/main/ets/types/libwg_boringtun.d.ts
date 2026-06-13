@@ -32,6 +32,12 @@ declare module 'libwg_boringtun.so' {
 
   export function getTunnelStats(handle: number): NativeTunnelStats;
 
+  export function getTickCount(): number;
+
+  export function getTunnelTickCount(handle: number): number;
+
+  export function getPersistentKeepaliveSeconds(handle: number): number;
+
   export function forceTunnelHandshake(handle: number): void;
 
   const wgNative: {
@@ -40,6 +46,9 @@ declare module 'libwg_boringtun.so' {
     startTunnel: typeof startTunnel,
     stopTunnel: typeof stopTunnel,
     getTunnelStats: typeof getTunnelStats,
+    getTickCount: typeof getTickCount,
+    getTunnelTickCount: typeof getTunnelTickCount,
+    getPersistentKeepaliveSeconds: typeof getPersistentKeepaliveSeconds,
     forceTunnelHandshake: typeof forceTunnelHandshake
   };
 

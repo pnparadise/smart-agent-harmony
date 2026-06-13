@@ -42,7 +42,13 @@
         "name": "WgVpnExtensionAbility",
         "srcEntry": "./ets/vpnextension/WgVpnExtensionAbility.ets",
         "type": "vpn",
-        "exported": false
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.vpn.config",
+            "resource": "$profile:vpn_config"
+          }
+        ]
       }
     ],
     "requestPermissions": [
