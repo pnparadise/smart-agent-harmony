@@ -26,8 +26,15 @@ import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
+const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
 const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
+const TUN_STATS_LOG_INTERVAL_MS = 2000;
+
+interface LoggedVpnConfig extends vpnExtension.VpnConfig {
+  trustedApplications?: string[];
+  blockedApplications?: string[];
+}
 
 export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private vpnConnection?: vpnExtension.VpnConnection;
@@ -38,6 +45,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
   private backgroundTaskRunning: boolean = false;
+  private statsLogTimer: number = -1;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
@@ -173,6 +181,9 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       const selectedSplitApps = await loadSelectedSplitApps(this.context as common.VpnExtensionContext, true);
       const vpnConfig = this.buildVpnConfig(config, appSplitEnabled, selectedSplitApps);
       const vpnMtu = vpnConfig.mtu === undefined ? 0 : vpnConfig.mtu;
+      const loggedVpnConfig = vpnConfig as LoggedVpnConfig;
+      const trustedApplications =
+        loggedVpnConfig.trustedApplications === undefined ? [] : loggedVpnConfig.trustedApplications;
       hilog.info(
         DOMAIN,
         TAG,
@@ -184,7 +195,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         String(vpnConfig.isIPv4Accepted),
         String(vpnConfig.isIPv6Accepted),
         String(appSplitEnabled),
-        selectedSplitApps.length
+        trustedApplications.length
       );
       this.logVpnConfigDetails(vpnConfig);
 
@@ -194,6 +205,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       NativeTunnel.start(this.tunnelHandle, tunFd);
       hilog.info(DOMAIN, TAG, 'native tunnel started');
       this.startNetworkObserver();
+      this.startStatsLogger();
       this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
@@ -284,7 +296,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     const routes: vpnExtension.RouteInfo[] = config.peer.allowedIPs
       .map((value: string) => parseCidr(value))
       .filter((parsed: ParsedCidr) => (parsed.family === 1 && ipv4Accepted) || (parsed.family === 2 && ipv6Accepted))
-      .map((parsed: ParsedCidr) => this.buildRoute(parsed));
+      .map((parsed: ParsedCidr) => this.buildRoute(parsed, addresses));
 
     const vpnConfig: vpnExtension.VpnConfig = {
       addresses: addresses,
@@ -309,11 +321,23 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     const bundleNames: string[] = [];
     for (let index = 0; index < apps.length; index++) {
       const bundleName = apps[index].bundleName;
-      if (bundleName.length > 0) {
+      if (bundleName.length > 0 && !this.hasBundleName(bundleNames, bundleName)) {
         bundleNames.push(bundleName);
       }
     }
+    if (!this.hasBundleName(bundleNames, BUNDLE_NAME)) {
+      bundleNames.push(BUNDLE_NAME);
+    }
     return bundleNames;
+  }
+
+  private hasBundleName(bundleNames: string[], bundleName: string): boolean {
+    for (let index = 0; index < bundleNames.length; index++) {
+      if (bundleNames[index] === bundleName) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private buildNetAddress(address: string, family: number): connection.NetAddress {
@@ -333,19 +357,30 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     return linkAddress;
   }
 
-  private buildRoute(parsed: ParsedCidr): vpnExtension.RouteInfo {
-    const gateway = parsed.family === 1 ? '0.0.0.0' : '::';
+  private buildRoute(parsed: ParsedCidr, addresses: vpnExtension.LinkAddress[]): vpnExtension.RouteInfo {
+    const gateway = this.findGatewayAddress(parsed.family, addresses);
     const route: vpnExtension.RouteInfo = {
       'interface': VPN_INTERFACE,
       destination: this.buildLinkAddress(parsed),
       gateway: this.buildNetAddress(gateway, parsed.family),
-      hasGateway: false,
+      hasGateway: true,
       isDefaultRoute: parsed.prefixLength === 0
     };
     return route;
   }
 
+  private findGatewayAddress(family: number, addresses: vpnExtension.LinkAddress[]): string {
+    for (let index = 0; index < addresses.length; index++) {
+      const address = addresses[index].address;
+      if (address.family === family && address.address.length > 0) {
+        return address.address;
+      }
+    }
+    return family === 1 ? '0.0.0.0' : '::';
+  }
+
   private logVpnConfigDetails(vpnConfig: vpnExtension.VpnConfig): void {
+    const loggedConfig = vpnConfig as LoggedVpnConfig;
     const addresses = vpnConfig.addresses
       .map((value: vpnExtension.LinkAddress) => this.formatLinkAddress(value))
       .join(',');
@@ -356,6 +391,30 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG, 'vpn config detail addresses=%{public}s', addresses);
     hilog.info(DOMAIN, TAG, 'vpn config detail routes=%{public}s', routes);
     hilog.info(DOMAIN, TAG, 'vpn config detail dns=%{public}s', dns);
+    hilog.error(
+      DOMAIN,
+      TAG,
+      'VPNCONFIG addresses=%{public}s routes=%{public}s dns=%{public}s ipv4=%{public}s ipv6=%{public}s trustedApplications=%{public}s blockedApplications=%{public}s',
+      this.formatEmptyList(addresses),
+      this.formatEmptyList(routes),
+      this.formatEmptyList(dns),
+      String(vpnConfig.isIPv4Accepted),
+      String(vpnConfig.isIPv6Accepted),
+      this.formatApplicationList(loggedConfig.trustedApplications),
+      this.formatApplicationList(loggedConfig.blockedApplications)
+    );
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'vpn config detail trustedApplications=%{public}s',
+      this.formatApplicationList(loggedConfig.trustedApplications)
+    );
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'vpn config detail blockedApplications=%{public}s',
+      this.formatApplicationList(loggedConfig.blockedApplications)
+    );
   }
 
   private formatLinkAddress(value: vpnExtension.LinkAddress): string {
@@ -363,7 +422,24 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private formatRoute(value: vpnExtension.RouteInfo): string {
-    return this.formatLinkAddress(value.destination) + ',default=' + String(value.isDefaultRoute);
+    return this.formatLinkAddress(value.destination) +
+      ',gateway=' + value.gateway.address +
+      ',hasGateway=' + String(value.hasGateway) +
+      ',default=' + String(value.isDefaultRoute);
+  }
+
+  private formatApplicationList(applications: string[] | undefined): string {
+    if (applications === undefined || applications.length === 0) {
+      return '<none>';
+    }
+    return applications.join(',');
+  }
+
+  private formatEmptyList(value: string): string {
+    if (value.length === 0) {
+      return '<none>';
+    }
+    return value;
   }
 
   private async cleanup(publishStopped: boolean = true): Promise<void> {
@@ -377,6 +453,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       String(publishStopped)
     );
     this.stopNetworkObserver();
+    this.stopStatsLogger();
     this.lastForceHandshakeAt = 0;
 
     if (this.tunnelHandle !== 0) {
@@ -501,6 +578,50 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     } catch (err) {
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'force handshake failed reason=%{public}s error=%{public}s', reason, this.formatError(error));
+    }
+  }
+
+  private startStatsLogger(): void {
+    this.stopStatsLogger();
+    this.logTunnelStats('start');
+    this.statsLogTimer = setInterval(() => {
+      this.logTunnelStats('interval');
+    }, TUN_STATS_LOG_INTERVAL_MS);
+  }
+
+  private stopStatsLogger(): void {
+    if (this.statsLogTimer < 0) {
+      return;
+    }
+    clearInterval(this.statsLogTimer);
+    this.statsLogTimer = -1;
+  }
+
+  private logTunnelStats(reason: string): void {
+    if (this.tunnelHandle === 0) {
+      return;
+    }
+
+    try {
+      const stats = NativeTunnel.stats(this.tunnelHandle);
+      hilog.error(
+        DOMAIN,
+        TAG,
+        'TUNSTATS reason=%{public}s tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunWrite=%{public}d tx=%{public}d rx=%{public}d handshake=%{public}d lastIn=%{public}s lastOut=%{public}s',
+        reason,
+        stats.tunReadPackets,
+        stats.tunDroppedPackets,
+        stats.udpReadPackets,
+        stats.tunWritePackets,
+        stats.txBytes,
+        stats.rxBytes,
+        stats.latestHandshakeSeconds,
+        this.formatEmptyList(stats.tunReadLast),
+        this.formatEmptyList(stats.tunWriteLast)
+      );
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'log native stats failed reason=%{public}s error=%{public}s', reason, this.formatError(error));
     }
   }
 

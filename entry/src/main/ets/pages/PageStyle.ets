@@ -1,0 +1,11 @@
+export const ACTION_BUTTON_RADIUS = 12;
+export const ACTION_BUTTON_BACKGROUND = '#EEF5FF';
+export const CARD_BACKGROUND = '#FFFFFF';
+export const CARD_RADIUS = 18;
+export const DIVIDER_COLOR = '#EEF0F4';
+export const PAGE_BACKGROUND = '#F4F6FA';
+export const PRIMARY_BLUE = '#3478F6';
+export const RUNNING_TUNNEL_BACKGROUND = '#EEF1F5';
+export const STOP_BUTTON_BACKGROUND = '#FDECEC';
+export const TEXT_PRIMARY = '#2D2F33';
+export const TEXT_SECONDARY = '#8C8F95';

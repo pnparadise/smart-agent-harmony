@@ -9,6 +9,12 @@ export interface TunnelStats {
   latestPacketSentSeconds: number;
   loss: number;
   rttMillis: number;
+  tunReadPackets: number;
+  tunDroppedPackets: number;
+  udpReadPackets: number;
+  tunWritePackets: number;
+  tunReadLast: string;
+  tunWriteLast: string;
 }
 
 export class NativeTunnel {
@@ -20,7 +26,8 @@ export class NativeTunnel {
       endpointHost ?? config.peer.endpointHost,
       config.peer.endpointPort,
       config.peer.persistentKeepalive,
-      config.iface.mtu
+      config.iface.mtu,
+      NativeTunnel.firstIpv4Dns(config.iface.dns)
     );
   }
 
@@ -69,7 +76,13 @@ export class NativeTunnel {
         -1
       ),
       loss: NativeTunnel.numberValue(stats.loss, undefined, 0),
-      rttMillis: NativeTunnel.numberValue(stats.rtt_millis, stats.rttMillis, -1)
+      rttMillis: NativeTunnel.numberValue(stats.rtt_millis, stats.rttMillis, -1),
+      tunReadPackets: NativeTunnel.numberValue(stats.tun_read_packets, stats.tunReadPackets, 0),
+      tunDroppedPackets: NativeTunnel.numberValue(stats.tun_dropped_packets, stats.tunDroppedPackets, 0),
+      udpReadPackets: NativeTunnel.numberValue(stats.udp_read_packets, stats.udpReadPackets, 0),
+      tunWritePackets: NativeTunnel.numberValue(stats.tun_write_packets, stats.tunWritePackets, 0),
+      tunReadLast: NativeTunnel.stringValue(stats.tun_read_last, stats.tunReadLast, ''),
+      tunWriteLast: NativeTunnel.stringValue(stats.tun_write_last, stats.tunWriteLast, '')
     };
     return tunnelStats;
   }
@@ -82,5 +95,43 @@ export class NativeTunnel {
       return secondary;
     }
     return fallback;
+  }
+
+  private static stringValue(primary: string | undefined, secondary: string | undefined, fallback: string): string {
+    if (primary !== undefined && primary.length > 0) {
+      return primary;
+    }
+    if (secondary !== undefined && secondary.length > 0) {
+      return secondary;
+    }
+    return fallback;
+  }
+
+  private static firstIpv4Dns(dnsAddresses: string[]): string {
+    for (let index = 0; index < dnsAddresses.length; index++) {
+      const value = dnsAddresses[index].trim();
+      if (NativeTunnel.isIpv4Address(value)) {
+        return value;
+      }
+    }
+    return '';
+  }
+
+  private static isIpv4Address(value: string): boolean {
+    const parts = value.split('.');
+    if (parts.length !== 4) {
+      return false;
+    }
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index];
+      if (part.length === 0 || part.length > 3) {
+        return false;
+      }
+      const parsed = Number(part);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
+        return false;
+      }
+    }
+    return true;
   }
 }

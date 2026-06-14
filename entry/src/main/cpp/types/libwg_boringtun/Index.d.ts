@@ -6,6 +6,12 @@ export interface NativeTunnelStats {
   latest_packet_sent_seconds: number;
   loss: number;
   rtt_millis: number;
+  tun_read_packets: number;
+  tun_dropped_packets: number;
+  udp_read_packets: number;
+  tun_write_packets: number;
+  tun_read_last: string;
+  tun_write_last: string;
 }
 
 export const createTunnel: (
@@ -15,7 +21,8 @@ export const createTunnel: (
   endpointHost: string,
   endpointPort: number,
   persistentKeepalive: number,
-  mtu: number
+  mtu: number,
+  dnsServer: string
 ) => number;
 
 export const getTunnelSocketFd: (handle: number) => number;

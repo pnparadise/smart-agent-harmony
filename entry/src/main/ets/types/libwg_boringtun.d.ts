@@ -12,17 +12,30 @@ declare module 'libwg_boringtun.so' {
     latestPacketSentSeconds?: number;
     rttMillis?: number;
     loss?: number;
+    tun_read_packets?: number;
+    tun_dropped_packets?: number;
+    udp_read_packets?: number;
+    tun_write_packets?: number;
+    tunReadPackets?: number;
+    tunDroppedPackets?: number;
+    udpReadPackets?: number;
+    tunWritePackets?: number;
+    tun_read_last?: string;
+    tun_write_last?: string;
+    tunReadLast?: string;
+    tunWriteLast?: string;
   }
 
-  export function createTunnel(
-    privateKey: string,
-    peerPublicKey: string,
-    presharedKey: string,
-    endpointHost: string,
-    endpointPort: number,
-    persistentKeepalive: number,
-    mtu: number
-  ): number;
+	  export function createTunnel(
+	    privateKey: string,
+	    peerPublicKey: string,
+	    presharedKey: string,
+	    endpointHost: string,
+	    endpointPort: number,
+	    persistentKeepalive: number,
+	    mtu: number,
+	    dnsServer: string
+	  ): number;
 
   export function getTunnelSocketFd(handle: number): number;
 
