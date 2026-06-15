@@ -21,8 +21,7 @@ export const createTunnel: (
   endpointHost: string,
   endpointPort: number,
   persistentKeepalive: number,
-  mtu: number,
-  dnsServer: string
+  mtu: number
 ) => number;
 
 export const getTunnelSocketFd: (handle: number) => number;

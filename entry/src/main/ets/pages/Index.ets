@@ -6,10 +6,12 @@ import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
+  ActiveTunnelInfo,
   clearActiveTunnel,
   createTunnelId,
   deleteTunnel,
   DEFAULT_DOH_PROVIDER,
+  loadActiveTunnelInfo,
   loadAppSplitEnabled,
   loadDohSettings,
   loadSelectedSplitApps,
@@ -1034,8 +1036,10 @@ struct Index {
   private async refreshRuntimeStatus(): Promise<void> {
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      let status = await loadTunnelRuntimeStatus(context, true);
-      if (status.running || this.runtimeRunning || this.vpnEnabled) {
+      const activeInfo: ActiveTunnelInfo = await loadActiveTunnelInfo(context, true);
+      let status: TunnelRuntimeStatus = await loadTunnelRuntimeStatus(context, true);
+      const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
+      if (status.running || this.runtimeRunning || this.vpnEnabled || hasActiveTunnel) {
         await this.requestRuntimeStatusRefresh();
         await this.sleep(150);
         status = await loadTunnelRuntimeStatus(context, true);
@@ -1043,11 +1047,12 @@ struct Index {
 
       const wasRunning = this.runtimeRunning;
       const pendingStart = this.isStartupGraceActive(status);
-      const running = status.running || pendingStart;
+      const restoring = hasActiveTunnel && !status.running;
+      const running = status.running || pendingStart || restoring;
       const hasRuntimeStats = running;
 
-      const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status) : '';
-      const resolvedTunnelName = running ? this.resolveRuntimeTunnelName(status, resolvedTunnelId) : '';
+      const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status, activeInfo.id) : '';
+      const resolvedTunnelName = running ? this.resolveRuntimeTunnelName(status, resolvedTunnelId, activeInfo.name) : '';
       this.runtimeRunning = running;
       this.runtimeTunnelId = hasRuntimeStats ? resolvedTunnelId : '';
       this.runtimeTunnelName = hasRuntimeStats ? resolvedTunnelName : '';
@@ -1059,7 +1064,7 @@ struct Index {
       this.runtimeUpdatedAt = status.updatedAt;
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
-      if (status.running) {
+      if (status.running || restoring) {
         this.runtimeConfirmedRunning = true;
         this.startingTunnelId = resolvedTunnelId;
         this.startingTunnelName = resolvedTunnelName;
@@ -1108,9 +1113,12 @@ struct Index {
     return Date.now() - status.updatedAt;
   }
 
-  private resolveRuntimeTunnelId(status: TunnelRuntimeStatus): string {
+  private resolveRuntimeTunnelId(status: TunnelRuntimeStatus, activeTunnelId: string = ''): string {
     if (status.tunnelId.length > 0) {
       return status.tunnelId;
+    }
+    if (activeTunnelId.length > 0) {
+      return activeTunnelId;
     }
     if (this.startingTunnelId.length > 0) {
       return this.startingTunnelId;
@@ -1121,9 +1129,16 @@ struct Index {
     return this.activeTunnelId;
   }
 
-  private resolveRuntimeTunnelName(status: TunnelRuntimeStatus, tunnelId: string): string {
+  private resolveRuntimeTunnelName(
+    status: TunnelRuntimeStatus,
+    tunnelId: string,
+    activeTunnelName: string = ''
+  ): string {
     if (status.tunnelName.length > 0) {
       return status.tunnelName;
+    }
+    if (activeTunnelName.length > 0) {
+      return activeTunnelName;
     }
     if (this.startingTunnelName.length > 0) {
       return this.startingTunnelName;

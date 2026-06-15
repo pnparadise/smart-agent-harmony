@@ -33,8 +33,7 @@ declare module 'libwg_boringtun.so' {
 	    endpointHost: string,
 	    endpointPort: number,
 	    persistentKeepalive: number,
-	    mtu: number,
-	    dnsServer: string
+	    mtu: number
 	  ): number;
 
   export function getTunnelSocketFd(handle: number): number;

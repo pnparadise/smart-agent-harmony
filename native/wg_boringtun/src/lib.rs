@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,14 +23,11 @@ const WG_BUFFER_SIZE: usize = MAX_IP_PACKET_SIZE + WG_BUFFER_PADDING;
 const HANDSHAKE_INDEX: u32 = 1;
 const WG_MESSAGE_HANDSHAKE_INITIATION: u32 = 1;
 const WG_MESSAGE_DATA: u32 = 4;
-const DNS_PORT: u16 = 53;
-const DNS_NAT_ENTRY_TTL_MS: u64 = 30_000;
-const DNS_NAT_MAX_ENTRIES: usize = 2048;
 const REKEY_TIMEOUT_MS: u64 = 5_000;
 const KEEPALIVE_TIMEOUT_MS: u64 = 10_000;
 const DATA_SILENCE_REKEY_MS: u64 = 15_000;
 const MIN_TIMER_DELAY_MS: u64 = 500;
-const QOS_USER_INITIATED: libc::c_int = 3;
+const QOS_BACKGROUND: libc::c_int = 0;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -72,8 +69,6 @@ struct TunnelRuntime {
     udp_read_packets: AtomicU64,
     tun_write_packets: AtomicU64,
     packet_summaries: Mutex<PacketSummaries>,
-    dns_server_v4: Option<[u8; 4]>,
-    dns_nat: Mutex<DnsNatState>,
     tick_count: AtomicU64,
     timer_state: Mutex<TimerState>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -90,26 +85,6 @@ struct PacketSummaries {
     tun_write_last: String,
 }
 
-struct DnsNatState {
-    mappings: HashMap<DnsNatKey, DnsNatEntry>,
-}
-
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct DnsNatKey {
-    client_ip: [u8; 4],
-    client_port: u16,
-}
-
-struct DnsNatEntry {
-    original_dns: [u8; 4],
-    updated_at_ms: u64,
-}
-
-struct DnsNatMapping {
-    key: DnsNatKey,
-    original_dns: [u8; 4],
-}
-
 #[napi]
 pub fn create_tunnel(
     private_key: String,
@@ -119,7 +94,6 @@ pub fn create_tunnel(
     endpoint_port: u32,
     persistent_keepalive: u32,
     mtu: u32,
-    dns_server: String,
 ) -> Result<i32> {
     let private_key = StaticSecret::from(decode_key(&private_key, "privateKey")?);
     let peer_public_key = PublicKey::from(decode_key(&peer_public_key, "peerPublicKey")?);
@@ -136,7 +110,6 @@ pub fn create_tunnel(
         Some(to_u16(persistent_keepalive, "persistentKeepalive")?)
     };
     let mtu = clamp_mtu(mtu);
-    let dns_server_v4 = parse_configured_dns_v4(&dns_server);
     let peer_addr = resolve_endpoint(&endpoint_host, endpoint_port)?;
     let socket = bind_udp(peer_addr)?;
 
@@ -168,10 +141,6 @@ pub fn create_tunnel(
         packet_summaries: Mutex::new(PacketSummaries {
             tun_read_last: String::new(),
             tun_write_last: String::new(),
-        }),
-        dns_server_v4,
-        dns_nat: Mutex::new(DnsNatState {
-            mappings: HashMap::new(),
         }),
         tick_count: AtomicU64::new(0),
         timer_state: Mutex::new(TimerState {
@@ -332,7 +301,7 @@ impl TunnelRuntime {
         let tun_worker = match thread::Builder::new()
             .name("wg-tun-reader".to_string())
             .spawn(move || {
-                let _qos = ThreadQosGuard::new(QOS_USER_INITIATED);
+                let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
                 tun_read_runtime.tun_reader_loop(tun_for_read, tun_stop_read, socket_for_write);
             })
             .map_err(to_error) {
@@ -348,7 +317,7 @@ impl TunnelRuntime {
         let udp_worker = match thread::Builder::new()
             .name("wg-udp-reader".to_string())
             .spawn(move || {
-                let _qos = ThreadQosGuard::new(QOS_USER_INITIATED);
+                let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
                 udp_runtime.udp_reader_loop(socket_for_read, udp_stop_read, tun_for_write);
             })
             .map_err(to_error) {
@@ -438,7 +407,6 @@ impl TunnelRuntime {
                         self.tun_dropped_packets.fetch_add(1, Ordering::SeqCst);
                         continue;
                     }
-                    self.rewrite_outbound_dns(&mut packet[..size]);
                     clamp_tcp_mss(&mut packet[..size], self.mtu);
                     let result = {
                         let mut tunn = match self.lock_tunn() {
@@ -570,15 +538,9 @@ impl TunnelRuntime {
             }
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
                 if let Some(fd) = tun_fd {
-                    let mut rewritten = Vec::new();
-                    let write_data = if self.rewrite_inbound_dns(data, &mut rewritten) {
-                        rewritten.as_slice()
-                    } else {
-                        data
-                    };
-                    if write_all_fd(fd, write_data).is_ok() {
+                    if write_all_fd(fd, data).is_ok() {
                         self.tun_write_packets.fetch_add(1, Ordering::SeqCst);
-                        self.set_tun_write_last(write_data);
+                        self.set_tun_write_last(data);
                     }
                 }
             }
@@ -727,55 +689,6 @@ impl TunnelRuntime {
         }
     }
 
-    fn rewrite_outbound_dns(&self, packet: &mut [u8]) {
-        let dns_server = match self.dns_server_v4 {
-            Some(value) => value,
-            None => return,
-        };
-        let mapping = match rewrite_outbound_dns_packet(packet, dns_server) {
-            Some(value) => value,
-            None => return,
-        };
-        if let Ok(mut state) = self.dns_nat.lock() {
-            let now = now_millis();
-            prune_dns_nat_mappings(&mut state, now);
-            if state.mappings.len() >= DNS_NAT_MAX_ENTRIES {
-                remove_oldest_dns_nat_mapping(&mut state);
-            }
-            state.mappings.insert(
-                mapping.key,
-                DnsNatEntry {
-                    original_dns: mapping.original_dns,
-                    updated_at_ms: now,
-                },
-            );
-        }
-    }
-
-    fn rewrite_inbound_dns(&self, packet: &[u8], rewritten: &mut Vec<u8>) -> bool {
-        let dns_server = match self.dns_server_v4 {
-            Some(value) => value,
-            None => return false,
-        };
-        let key = match inbound_dns_nat_key(packet, dns_server) {
-            Some(value) => value,
-            None => return false,
-        };
-        let original_dns = {
-            let mut state = match self.dns_nat.lock() {
-                Ok(state) => state,
-                Err(_) => return false,
-            };
-            prune_dns_nat_mappings(&mut state, now_millis());
-            match state.mappings.remove(&key) {
-                Some(entry) => entry.original_dns,
-                None => return false,
-            }
-        };
-        rewritten.clear();
-        rewritten.extend_from_slice(packet);
-        rewrite_inbound_dns_packet(rewritten, original_dns)
-    }
 }
 
 struct ThreadQosGuard {
@@ -972,125 +885,6 @@ fn format_ipv6(addr: &[u8]) -> String {
     parts.join(":")
 }
 
-fn rewrite_outbound_dns_packet(packet: &mut [u8], dns_server: [u8; 4]) -> Option<DnsNatMapping> {
-    let info = parse_ipv4_udp_packet(packet)?;
-    if info.dst_port != DNS_PORT || info.dst_ip == dns_server {
-        return None;
-    }
-
-    let mapping = DnsNatMapping {
-        key: DnsNatKey {
-            client_ip: info.src_ip,
-            client_port: info.src_port,
-        },
-        original_dns: info.dst_ip,
-    };
-    packet[16..20].copy_from_slice(&dns_server);
-    write_ipv4_header_checksum(packet, info.ip_header_len);
-    write_ipv4_udp_checksum(packet, info.ip_header_len, info.total_len);
-    Some(mapping)
-}
-
-fn inbound_dns_nat_key(packet: &[u8], dns_server: [u8; 4]) -> Option<DnsNatKey> {
-    let info = parse_ipv4_udp_packet(packet)?;
-    if info.src_port != DNS_PORT || info.src_ip != dns_server {
-        return None;
-    }
-    Some(DnsNatKey {
-        client_ip: info.dst_ip,
-        client_port: info.dst_port,
-    })
-}
-
-fn rewrite_inbound_dns_packet(packet: &mut [u8], original_dns: [u8; 4]) -> bool {
-    let info = match parse_ipv4_udp_packet(packet) {
-        Some(value) => value,
-        None => return false,
-    };
-    packet[12..16].copy_from_slice(&original_dns);
-    write_ipv4_header_checksum(packet, info.ip_header_len);
-    write_ipv4_udp_checksum(packet, info.ip_header_len, info.total_len);
-    true
-}
-
-struct Ipv4UdpPacketInfo {
-    ip_header_len: usize,
-    total_len: usize,
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-}
-
-fn parse_ipv4_udp_packet(packet: &[u8]) -> Option<Ipv4UdpPacketInfo> {
-    if packet.len() < 28 || packet[0] >> 4 != 4 || packet[9] != libc::IPPROTO_UDP as u8 {
-        return None;
-    }
-
-    if ipv4_fragment_offset(packet) != 0 {
-        return None;
-    }
-
-    let ip_header_len = usize::from(packet[0] & 0x0f) * 4;
-    let total_len = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
-    if ip_header_len < 20 || total_len < ip_header_len + 8 || packet.len() < total_len {
-        return None;
-    }
-
-    let udp_start = ip_header_len;
-    let udp_len = usize::from(u16::from_be_bytes([packet[udp_start + 4], packet[udp_start + 5]]));
-    if udp_len < 8 || udp_start + udp_len > total_len {
-        return None;
-    }
-
-    Some(Ipv4UdpPacketInfo {
-        ip_header_len,
-        total_len,
-        src_ip: [packet[12], packet[13], packet[14], packet[15]],
-        dst_ip: [packet[16], packet[17], packet[18], packet[19]],
-        src_port: u16::from_be_bytes([packet[udp_start], packet[udp_start + 1]]),
-        dst_port: u16::from_be_bytes([packet[udp_start + 2], packet[udp_start + 3]]),
-    })
-}
-
-fn ipv4_fragment_offset(packet: &[u8]) -> u16 {
-    u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff
-}
-
-fn write_ipv4_header_checksum(packet: &mut [u8], ip_header_len: usize) {
-    packet[10] = 0;
-    packet[11] = 0;
-    let checksum = finish_checksum(add_checksum_bytes(0, &packet[..ip_header_len])).to_be_bytes();
-    packet[10] = checksum[0];
-    packet[11] = checksum[1];
-}
-
-fn write_ipv4_udp_checksum(packet: &mut [u8], ip_header_len: usize, total_len: usize) {
-    let udp_start = ip_header_len;
-    let udp_len = usize::from(u16::from_be_bytes([
-        packet[udp_start + 4],
-        packet[udp_start + 5],
-    ]));
-    if udp_len < 8 || udp_start + udp_len > total_len {
-        return;
-    }
-
-    packet[udp_start + 6] = 0;
-    packet[udp_start + 7] = 0;
-
-    let mut sum = 0u32;
-    sum = add_checksum_bytes(sum, &packet[12..16]);
-    sum = add_checksum_bytes(sum, &packet[16..20]);
-    sum = add_checksum_bytes(sum, &[0, libc::IPPROTO_UDP as u8]);
-    sum = add_checksum_bytes(sum, &(udp_len as u16).to_be_bytes());
-    sum = add_checksum_bytes(sum, &packet[udp_start..udp_start + udp_len]);
-
-    let checksum = finish_checksum(sum);
-    let checksum = if checksum == 0 { 0xffff } else { checksum }.to_be_bytes();
-    packet[udp_start + 6] = checksum[0];
-    packet[udp_start + 7] = checksum[1];
-}
-
 fn clamp_tcp_mss(packet: &mut [u8], mtu: usize) -> bool {
     if packet.is_empty() {
         return false;
@@ -1282,28 +1076,6 @@ fn compact_deadlines(deadlines: &mut Vec<u64>) {
     if deadlines.len() > 16 {
         deadlines.truncate(16);
     }
-}
-
-fn prune_dns_nat_mappings(state: &mut DnsNatState, now_ms: u64) {
-    state
-        .mappings
-        .retain(|_, entry| now_ms.saturating_sub(entry.updated_at_ms) <= DNS_NAT_ENTRY_TTL_MS);
-}
-
-fn remove_oldest_dns_nat_mapping(state: &mut DnsNatState) {
-    let oldest_key = state
-        .mappings
-        .iter()
-        .min_by_key(|(_, entry)| entry.updated_at_ms)
-        .map(|(key, _)| *key);
-    if let Some(key) = oldest_key {
-        state.mappings.remove(&key);
-    }
-}
-
-fn parse_configured_dns_v4(value: &str) -> Option<[u8; 4]> {
-    let parsed = value.trim().parse::<Ipv4Addr>().ok()?;
-    Some(parsed.octets())
 }
 
 fn decode_key(value: &str, field_name: &str) -> Result<[u8; 32]> {

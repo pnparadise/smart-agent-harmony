@@ -21,7 +21,6 @@ import {
   WireGuardConfig
 } from '../wireguard/WireGuardConfig';
 import { NativeTunnel } from '../wireguard/NativeTunnel';
-import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
@@ -29,7 +28,7 @@ const VPN_INTERFACE = 'vpn-tun';
 const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
 const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
-const TUN_STATS_LOG_INTERVAL_MS = 2000;
+const WANT_ACTION_RESTORE = 'restore';
 
 interface LoggedVpnConfig extends vpnExtension.VpnConfig {
   trustedApplications?: string[];
@@ -44,14 +43,15 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private activeTunnelName: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
-  private backgroundTaskRunning: boolean = false;
-  private statsLogTimer: number = -1;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     if (this.isRefreshStatusWant(want)) {
-      this.publishRuntimeStatus(false, false).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'publish refresh status on create failed: %{public}s', this.formatError(err));
+      this.restartWireGuard('refreshOnCreate', false).catch((err: BusinessError) => {
+        hilog.error(DOMAIN, TAG, 'refresh startup failed: %{public}s', this.formatError(err));
+        this.publishRuntimeStatus(false, false).catch((statusErr: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'publish refresh status after startup failure failed: %{public}s', this.formatError(statusErr));
+        });
       });
       return;
     }
@@ -73,6 +73,13 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
+    if (this.isRestoreWant(want) && this.tunnelHandle !== 0) {
+      this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'publish restore status failed: %{public}s', this.formatError(err));
+      });
+      return;
+    }
+
     this.restartWireGuard('onRequest', true).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'restart failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
@@ -83,7 +90,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onDestroy');
-    this.cleanup().catch((err: BusinessError) => {
+    this.cleanup(false).catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'cleanup on destroy failed: %{public}s', this.formatError(err));
     });
   }
@@ -116,7 +123,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   private async startWireGuard(): Promise<void> {
     hilog.info(DOMAIN, TAG, 'startWireGuard begin');
-    await this.startBackgroundProtection();
 
     const activeInfo = await this.resolveActiveTunnelInfo();
     this.activeTunnelId = activeInfo.id;
@@ -205,7 +211,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       NativeTunnel.start(this.tunnelHandle, tunFd);
       hilog.info(DOMAIN, TAG, 'native tunnel started');
       this.startNetworkObserver();
-      this.startStatsLogger();
       this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
@@ -453,7 +458,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       String(publishStopped)
     );
     this.stopNetworkObserver();
-    this.stopStatsLogger();
     this.lastForceHandshakeAt = 0;
 
     if (this.tunnelHandle !== 0) {
@@ -476,34 +480,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       });
     }
 
-    await this.stopBackgroundProtection();
     hilog.info(DOMAIN, TAG, 'cleanup end');
-  }
-
-  private async startBackgroundProtection(): Promise<void> {
-    if (this.backgroundTaskRunning) {
-      return;
-    }
-
-    hilog.info(DOMAIN, TAG, 'starting background protection before vpn/native init');
-    try {
-      await startVpnDataTransferTask(this.context as common.VpnExtensionContext);
-      this.backgroundTaskRunning = true;
-      hilog.info(DOMAIN, TAG, 'background protection active');
-    } catch (err) {
-      const error = err as BusinessError;
-      this.backgroundTaskRunning = false;
-      hilog.warn(DOMAIN, TAG, 'background protection unavailable, continue vpn start: %{public}s', this.formatError(error));
-    }
-  }
-
-  private async stopBackgroundProtection(): Promise<void> {
-    const hadBackgroundTask = this.backgroundTaskRunning;
-    this.backgroundTaskRunning = false;
-    await stopVpnDataTransferTask(this.context as common.VpnExtensionContext);
-    if (!hadBackgroundTask) {
-      hilog.info(DOMAIN, TAG, 'background protection cleanup requested without active continuous task');
-    }
   }
 
   private startNetworkObserver(): void {
@@ -581,50 +558,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
-  private startStatsLogger(): void {
-    this.stopStatsLogger();
-    this.logTunnelStats('start');
-    this.statsLogTimer = setInterval(() => {
-      this.logTunnelStats('interval');
-    }, TUN_STATS_LOG_INTERVAL_MS);
-  }
-
-  private stopStatsLogger(): void {
-    if (this.statsLogTimer < 0) {
-      return;
-    }
-    clearInterval(this.statsLogTimer);
-    this.statsLogTimer = -1;
-  }
-
-  private logTunnelStats(reason: string): void {
-    if (this.tunnelHandle === 0) {
-      return;
-    }
-
-    try {
-      const stats = NativeTunnel.stats(this.tunnelHandle);
-      hilog.error(
-        DOMAIN,
-        TAG,
-        'TUNSTATS reason=%{public}s tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunWrite=%{public}d tx=%{public}d rx=%{public}d handshake=%{public}d lastIn=%{public}s lastOut=%{public}s',
-        reason,
-        stats.tunReadPackets,
-        stats.tunDroppedPackets,
-        stats.udpReadPackets,
-        stats.tunWritePackets,
-        stats.txBytes,
-        stats.rxBytes,
-        stats.latestHandshakeSeconds,
-        this.formatEmptyList(stats.tunReadLast),
-        this.formatEmptyList(stats.tunWriteLast)
-      );
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'log native stats failed reason=%{public}s error=%{public}s', reason, this.formatError(error));
-    }
-  }
-
   private async publishRuntimeStatus(running: boolean, includeStats: boolean): Promise<void> {
     let txBytes = 0;
     let rxBytes = 0;
@@ -663,11 +596,23 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private isRefreshStatusWant(want: Want): boolean {
+    return this.wantAction(want) === WANT_ACTION_REFRESH_STATUS;
+  }
+
+  private isRestoreWant(want: Want): boolean {
+    return this.wantAction(want) === WANT_ACTION_RESTORE;
+  }
+
+  private wantAction(want: Want): string {
     const parameters = want.parameters;
     if (parameters === undefined) {
-      return false;
+      return '';
     }
-    return parameters.action === WANT_ACTION_REFRESH_STATUS;
+    const action = parameters.action;
+    if (typeof action === 'string') {
+      return action;
+    }
+    return '';
   }
 
   private formatError(error: BusinessError): string {

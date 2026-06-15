@@ -26,8 +26,7 @@ export class NativeTunnel {
       endpointHost ?? config.peer.endpointHost,
       config.peer.endpointPort,
       config.peer.persistentKeepalive,
-      config.iface.mtu,
-      NativeTunnel.firstIpv4Dns(config.iface.dns)
+      config.iface.mtu
     );
   }
 
@@ -105,33 +104,5 @@ export class NativeTunnel {
       return secondary;
     }
     return fallback;
-  }
-
-  private static firstIpv4Dns(dnsAddresses: string[]): string {
-    for (let index = 0; index < dnsAddresses.length; index++) {
-      const value = dnsAddresses[index].trim();
-      if (NativeTunnel.isIpv4Address(value)) {
-        return value;
-      }
-    }
-    return '';
-  }
-
-  private static isIpv4Address(value: string): boolean {
-    const parts = value.split('.');
-    if (parts.length !== 4) {
-      return false;
-    }
-    for (let index = 0; index < parts.length; index++) {
-      const part = parts[index];
-      if (part.length === 0 || part.length > 3) {
-        return false;
-      }
-      const parsed = Number(part);
-      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
-        return false;
-      }
-    }
-    return true;
   }
 }

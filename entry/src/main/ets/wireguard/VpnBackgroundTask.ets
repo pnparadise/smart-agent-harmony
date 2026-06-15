@@ -1,83 +1,80 @@
-import { common, Want } from '@kit.AbilityKit';
+import { common, wantAgent, Want, WantAgent } from '@kit.AbilityKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import wantAgent from '@ohos.app.ability.wantAgent';
-import notification from '@ohos.notification';
-import notificationManager from '@ohos.notificationManager';
-import backgroundTaskManager from '@ohos.resourceschedule.backgroundTaskManager';
 
 const DOMAIN = 0x0001;
 const TAG = 'VpnBackgroundTask';
 const BUNDLE_NAME = 'com.smart.agent';
 const MODULE_NAME = 'entry';
-const ENTRY_ABILITY = 'EntryAbility';
-const VPN_NOTIFICATION_ID = 1001;
+const VPN_ABILITY = 'WgVpnExtensionAbility';
 
-export async function startVpnDataTransferTask(context: common.Context): Promise<void> {
-  const agent = await createEntryWantAgent();
-  await notificationManager.publish(buildVpnNotificationRequest());
-  hilog.info(DOMAIN, TAG, 'vpn foreground notification published id=%{public}d', VPN_NOTIFICATION_ID);
-  await backgroundTaskManager.startBackgroundRunning(
-    context,
-    backgroundTaskManager.BackgroundMode.DATA_TRANSFER,
-    agent
-  );
-  hilog.info(DOMAIN, TAG, 'dataTransfer continuous task started');
+let vpnDataTransferTaskStarted = false;
+
+export async function startVpnDataTransferTask(context: common.UIAbilityContext): Promise<void> {
+  const agent = await createVpnWantAgent();
+  try {
+    await backgroundTaskManager.startBackgroundRunning(
+      context,
+      backgroundTaskManager.BackgroundMode.DATA_TRANSFER,
+      agent
+    );
+    vpnDataTransferTaskStarted = true;
+    hilog.info(DOMAIN, TAG, 'dataTransfer continuous task started');
+  } catch (err) {
+    const error = err as BusinessError;
+    if (await hasContinuousTask(context)) {
+      vpnDataTransferTaskStarted = true;
+      hilog.info(DOMAIN, TAG, 'dataTransfer continuous task already active after start attempt: %{public}s', formatError(error));
+      return;
+    }
+    vpnDataTransferTaskStarted = false;
+    throw new Error('start continuous task failed: ' + formatError(error));
+  }
 }
 
-export async function stopVpnDataTransferTask(context: common.Context): Promise<void> {
+export async function stopVpnDataTransferTask(context: common.UIAbilityContext): Promise<void> {
   try {
+    if (!vpnDataTransferTaskStarted && !await hasContinuousTask(context)) {
+      hilog.info(DOMAIN, TAG, 'dataTransfer continuous task not active');
+      return;
+    }
     await backgroundTaskManager.stopBackgroundRunning(context);
+    vpnDataTransferTaskStarted = false;
     hilog.info(DOMAIN, TAG, 'dataTransfer continuous task stopped');
   } catch (err) {
     const error = err as BusinessError;
+    vpnDataTransferTaskStarted = false;
     hilog.warn(DOMAIN, TAG, 'stop continuous task failed: %{public}s', formatError(error));
   }
-
-  try {
-    await notificationManager.cancel(VPN_NOTIFICATION_ID);
-    hilog.info(DOMAIN, TAG, 'vpn foreground notification canceled id=%{public}d', VPN_NOTIFICATION_ID);
-  } catch (err) {
-    const error = err as BusinessError;
-    hilog.warn(DOMAIN, TAG, 'cancel vpn notification failed: %{public}s', formatError(error));
-  }
 }
 
-function buildVpnNotificationRequest(): notificationManager.NotificationRequest {
-  const request: notificationManager.NotificationRequest = {
-    id: VPN_NOTIFICATION_ID,
-    notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
-    isOngoing: true,
-    isUnremovable: true,
-    tapDismissed: false,
-    content: {
-      contentType: notification.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-      notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-      normal: {
-        title: 'Smart Agent VPN',
-        text: 'Secure data transfer active',
-        additionalText: 'WireGuard tunnel running'
-      }
-    }
-  };
-  return request;
-}
-
-async function createEntryWantAgent(): Promise<object> {
-  const entryWant: Want = {
+async function createVpnWantAgent(): Promise<WantAgent> {
+  const vpnWant: Want = {
     bundleName: BUNDLE_NAME,
     moduleName: MODULE_NAME,
-    abilityName: ENTRY_ABILITY
+    abilityName: VPN_ABILITY
   };
-  const entryWants: Array<Want> = [entryWant];
-  const actionFlags: Array<wantAgent.WantAgentFlags> = [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG];
   const wantAgentInfo: wantAgent.WantAgentInfo = {
-    wants: entryWants,
+    wants: [vpnWant],
     actionType: wantAgent.OperationType.START_ABILITY,
     requestCode: 0,
-    actionFlags: actionFlags
+    wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
   };
   return await wantAgent.getWantAgent(wantAgentInfo);
+}
+
+async function hasContinuousTask(context: common.UIAbilityContext): Promise<boolean> {
+  try {
+    const tasks = await backgroundTaskManager.getAllContinuousTasks(context, false);
+    return tasks.length > 0;
+  } catch (err) {
+    const error = err as BusinessError;
+    if (vpnDataTransferTaskStarted) {
+      hilog.warn(DOMAIN, TAG, 'query continuous task failed while marked active: %{public}s', formatError(error));
+    }
+    return vpnDataTransferTaskStarted;
+  }
 }
 
 function formatError(error: BusinessError): string {

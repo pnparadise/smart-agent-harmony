@@ -21,8 +21,7 @@
         "startWindowIcon": "$media:app_icon",
         "startWindowBackground": "$color:start_window_background",
         "backgroundModes": [
-          "dataTransfer",
-          "taskKeeping"
+          "dataTransfer"
         ],
         "exported": true,
         "skills": [
