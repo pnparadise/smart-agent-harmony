@@ -7,11 +7,14 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
   ActiveTunnelInfo,
+  AgentLogEntry,
+  clearAgentLogs,
   clearActiveTunnel,
   createTunnelId,
   deleteTunnel,
   DEFAULT_DOH_PROVIDER,
   loadActiveTunnelInfo,
+  loadAgentLogs,
   loadAppSplitEnabled,
   loadDohSettings,
   loadSelectedSplitApps,
@@ -31,7 +34,6 @@ import { stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 import { AppPickerPage } from './AppPickerPage';
 import { LogsPage } from './LogsPage';
-import { AgentLogEntry } from './PageModels';
 import {
   ACTION_BUTTON_BACKGROUND,
   ACTION_BUTTON_RADIUS,
@@ -131,6 +133,7 @@ struct Index {
     this.loadTunnelList();
     this.loadAppSplitSettings();
     this.loadDohSettings();
+    this.loadLogs();
     this.refreshRuntimeStatus();
     this.startStatusRefresh();
   }
@@ -428,7 +431,10 @@ struct Index {
           LogsPage({
             logs: this.logs,
             onClearLogs: () => {
-              this.logs = [];
+              this.clearLogs();
+            },
+            onRefreshLogs: async () => {
+              await this.loadLogs();
             }
           });
         }
@@ -703,6 +709,28 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'restart vpn for rule change reason=%{public}s', reason);
     await vpnExtension.startVpnExtensionAbility(this.buildWant());
     this.statusText = 'Rules updated';
+  }
+
+  private async loadLogs(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      this.logs = await loadAgentLogs(context, true);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load logs failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
+  private async clearLogs(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      await clearAgentLogs(context);
+      this.logs = [];
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'clear logs failed: %{public}s', error.message ?? JSON.stringify(err));
+      this.statusText = error.message ?? JSON.stringify(err);
+    }
   }
 
   private bundleNamesForApps(apps: SplitAppInfo[]): string[] {
@@ -1037,6 +1065,7 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const activeInfo: ActiveTunnelInfo = await loadActiveTunnelInfo(context, true);
+      this.logs = await loadAgentLogs(context, true);
       let status: TunnelRuntimeStatus = await loadTunnelRuntimeStatus(context, true);
       const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
       if (status.running || this.runtimeRunning || this.vpnEnabled || hasActiveTunnel) {

@@ -27,6 +27,13 @@ export interface TunnelRuntimeStatus {
   updatedAt: number;
 }
 
+export interface AgentLogEntry {
+  id: string;
+  title: string;
+  subtitle: string;
+  createdAt: number;
+}
+
 export interface SplitAppInfo {
   bundleName: string;
   label: string;
@@ -56,6 +63,9 @@ const APP_SPLIT_ENABLED_KEY = 'wg_app_split_enabled';
 const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
 const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
+const LOG_ENTRIES_KEY = 'wg_log_entries';
+const LAST_VPN_RESTORE_AT_KEY = 'wg_last_vpn_restore_at';
+const MAX_LOG_ENTRIES = 100;
 export const DEFAULT_DOH_PROVIDER = 'https://dns.alidns.com/dns-query';
 
 export interface DohSettings {
@@ -193,6 +203,70 @@ export async function loadTunnelRuntimeStatus(
     updatedAt: await store.get(STATUS_UPDATED_AT_KEY, 0) as number
   };
   return status;
+}
+
+export async function appendAgentLog(context: StoreContext, entry: AgentLogEntry): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const entries = await loadAgentLogsFromStore(store);
+  const normalizedEntry = normalizeAgentLogEntry(entry);
+  const nextEntries: AgentLogEntry[] = [normalizedEntry];
+  for (let index = 0; index < entries.length && nextEntries.length < MAX_LOG_ENTRIES; index++) {
+    const existing = entries[index];
+    if (existing.id !== normalizedEntry.id) {
+      nextEntries.push(existing);
+    }
+  }
+
+  await store.put(LOG_ENTRIES_KEY, formatAgentLogList(nextEntries));
+  await store.flush();
+}
+
+export async function loadAgentLogs(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<AgentLogEntry[]> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return await loadAgentLogsFromStore(store);
+}
+
+export async function clearAgentLogs(context: StoreContext): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  await store.delete(LOG_ENTRIES_KEY);
+  await store.flush();
+}
+
+export function buildVpnRestartLogEntry(tunnelName: string, createdAt: number = Date.now()): AgentLogEntry {
+  const timestamp = numberValue(createdAt, Date.now());
+  const normalizedTime = timestamp <= 0 ? Date.now() : timestamp;
+  const entry: AgentLogEntry = {
+    id: createAgentLogId('vpn_restart', normalizedTime),
+    title: 'vpn重启',
+    subtitle: '拉起隧道：' + normalizedLogTunnelName(tunnelName),
+    createdAt: normalizedTime
+  };
+  return entry;
+}
+
+export async function loadLastVpnRestoreAt(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<number> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return await store.get(LAST_VPN_RESTORE_AT_KEY, 0) as number;
+}
+
+export async function saveLastVpnRestoreAt(context: StoreContext, value: number): Promise<void> {
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  await store.put(LAST_VPN_RESTORE_AT_KEY, numberValue(value, Date.now()));
+  await store.flush();
 }
 
 export async function saveAppSplitEnabled(context: StoreContext, enabled: boolean): Promise<void> {
@@ -415,6 +489,86 @@ function parseSplitAppList(rawValue: string): SplitAppInfo[] {
     }
   }
   return apps;
+}
+
+async function loadAgentLogsFromStore(store: preferences.Preferences): Promise<AgentLogEntry[]> {
+  const rawValue = await store.get(LOG_ENTRIES_KEY, '');
+  return parseAgentLogList(rawValue as string);
+}
+
+function formatAgentLogList(entries: AgentLogEntry[]): string {
+  const lines: string[] = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = normalizeAgentLogEntry(entries[index]);
+    if (entry.id.length > 0 && entry.title.length > 0) {
+      lines.push(
+        encodeURIComponent(entry.id) + '\t' +
+        encodeURIComponent(entry.title) + '\t' +
+        encodeURIComponent(entry.subtitle) + '\t' +
+        String(entry.createdAt)
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+function parseAgentLogList(rawValue: string): AgentLogEntry[] {
+  if (rawValue.length === 0) {
+    return [];
+  }
+
+  const lines = rawValue.split('\n');
+  const entries: AgentLogEntry[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.length === 0 || entries.length >= MAX_LOG_ENTRIES) {
+      continue;
+    }
+
+    const parts = line.split('\t');
+    if (parts.length < 4) {
+      continue;
+    }
+
+    try {
+      const entry: AgentLogEntry = {
+        id: decodeURIComponent(parts[0]),
+        title: decodeURIComponent(parts[1]),
+        subtitle: decodeURIComponent(parts[2]),
+        createdAt: Number(parts[3])
+      };
+      const normalized = normalizeAgentLogEntry(entry);
+      if (normalized.id.length > 0 && normalized.title.length > 0) {
+        entries.push(normalized);
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'parse agent log failed: %{public}s', formatUnknownError(err));
+    }
+  }
+  return entries;
+}
+
+function normalizeAgentLogEntry(entry: AgentLogEntry): AgentLogEntry {
+  const createdAt = numberValue(entry.createdAt, Date.now());
+  const normalized: AgentLogEntry = {
+    id: stringValue(entry.id),
+    title: stringValue(entry.title),
+    subtitle: stringValue(entry.subtitle),
+    createdAt: createdAt <= 0 ? Date.now() : createdAt
+  };
+  return normalized;
+}
+
+function createAgentLogId(prefix: string, createdAt: number): string {
+  return prefix + '_' + String(createdAt) + '_' + String(Math.floor(Math.random() * 1000000));
+}
+
+function normalizedLogTunnelName(tunnelName: string): string {
+  const normalized = tunnelName.trim();
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return '未知隧道';
 }
 
 async function saveTunnelToStore(store: preferences.Preferences, tunnel: TunnelConfig, ids: string[]): Promise<void> {

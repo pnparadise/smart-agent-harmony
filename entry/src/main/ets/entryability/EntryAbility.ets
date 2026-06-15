@@ -3,7 +3,12 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
-import { loadActiveTunnelInfo, loadTunnelRuntimeStatus } from '../wireguard/ConfigStore';
+import {
+  loadActiveTunnelInfo,
+  loadLastVpnRestoreAt,
+  saveLastVpnRestoreAt,
+  loadTunnelRuntimeStatus
+} from '../wireguard/ConfigStore';
 import { startVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
@@ -16,6 +21,7 @@ const VPN_RESTORE_DEBOUNCE_MS = 2000;
 
 export default class EntryAbility extends UIAbility {
   private lastVpnRestoreAt: number = 0;
+  private vpnRestoreInFlight: boolean = false;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
@@ -76,8 +82,23 @@ export default class EntryAbility extends UIAbility {
   }
 
   private async restoreVpnIfNeeded(reason: string): Promise<void> {
+    if (this.vpnRestoreInFlight) {
+      hilog.info(DOMAIN, TAG, 'skip vpn restore reason=%{public}s, restore already in flight', reason);
+      return;
+    }
+
+    this.vpnRestoreInFlight = true;
+    try {
+      await this.doRestoreVpnIfNeeded(reason);
+    } finally {
+      this.vpnRestoreInFlight = false;
+    }
+  }
+
+  private async doRestoreVpnIfNeeded(reason: string): Promise<void> {
     const now = Date.now();
-    if (now - this.lastVpnRestoreAt < VPN_RESTORE_DEBOUNCE_MS) {
+    const lastRestoreAt = Math.max(this.lastVpnRestoreAt, await loadLastVpnRestoreAt(this.context, true));
+    if (now - lastRestoreAt < VPN_RESTORE_DEBOUNCE_MS) {
       hilog.info(DOMAIN, TAG, 'skip vpn restore reason=%{public}s, debounce active', reason);
       return;
     }
@@ -90,6 +111,7 @@ export default class EntryAbility extends UIAbility {
     }
 
     this.lastVpnRestoreAt = now;
+    await saveLastVpnRestoreAt(this.context, now);
     await startVpnDataTransferTask(this.context);
     await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
     hilog.info(

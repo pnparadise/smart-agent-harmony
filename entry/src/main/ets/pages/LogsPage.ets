@@ -1,32 +1,43 @@
-import { AgentLogEntry } from './PageModels';
+import { AgentLogEntry } from '../wireguard/ConfigStore';
 import { CARD_BACKGROUND, CARD_RADIUS, PAGE_BACKGROUND, PRIMARY_BLUE, TEXT_PRIMARY, TEXT_SECONDARY } from './PageStyle';
 
 @Component
 export struct LogsPage {
   @Prop logs: AgentLogEntry[] = [];
+  @State private refreshing: boolean = false;
   onClearLogs: () => void = () => {};
+  onRefreshLogs: () => Promise<void> = () => Promise.resolve();
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
-      Scroll() {
-        Column() {
-          if (this.logs.length === 0) {
-            this.buildEmptyLogCard();
-          } else {
-            ForEach(this.logs, (entry: AgentLogEntry) => {
-              this.buildLogCard(entry);
-            }, (entry: AgentLogEntry) => entry.id)
-          }
+      Refresh({ refreshing: $$this.refreshing }) {
+        Scroll() {
+          Column() {
+            if (this.logs.length === 0) {
+              this.buildEmptyLogCard();
+            } else {
+              ForEach(this.logs, (entry: AgentLogEntry) => {
+                this.buildLogCard(entry);
+              }, (entry: AgentLogEntry) => entry.id)
+            }
 
-          Blank()
-            .height(112)
+            Blank()
+              .height(112)
+          }
+          .width('100%')
+          .constraintSize({ minHeight: '100%' })
+          .justifyContent(FlexAlign.Start)
+          .padding({ left: 20, right: 20, top: 30, bottom: 20 })
         }
         .width('100%')
-        .padding({ left: 20, right: 20, top: 30, bottom: 20 })
+        .height('100%')
+        .scrollBar(BarState.Off)
       }
       .width('100%')
       .height('100%')
-      .scrollBar(BarState.Off)
+      .onRefreshing(() => {
+        this.refreshLogs();
+      })
 
       Row() {
         Button() {
@@ -51,6 +62,16 @@ export struct LogsPage {
     .width('100%')
     .height('100%')
     .backgroundColor(PAGE_BACKGROUND)
+  }
+
+  private refreshLogs(): void {
+    this.onRefreshLogs()
+      .then(() => {
+        this.refreshing = false;
+      })
+      .catch(() => {
+        this.refreshing = false;
+      });
   }
 
   @Builder
@@ -79,35 +100,66 @@ export struct LogsPage {
   private buildLogCard(entry: AgentLogEntry) {
     Column() {
       Row() {
-        Text(entry.time)
-          .fontSize(16)
+        Text(entry.title)
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(TEXT_PRIMARY)
+          .layoutWeight(1)
+          .maxLines(1)
+
+        Text(this.formatLogTime(entry.createdAt))
+          .fontSize(13)
           .fontColor('#7F838A')
           .maxLines(1)
-          .layoutWeight(1)
-        Text(entry.badge)
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(PRIMARY_BLUE)
-          .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-          .backgroundColor('#EEF5FF')
-          .borderRadius(6)
-          .maxLines(1)
+          .margin({ left: 12 })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
-      Text(entry.message)
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(TEXT_PRIMARY)
+      Text(this.formatLogSubtitle(entry.subtitle))
+        .fontSize(14)
+        .fontColor(TEXT_SECONDARY)
+        .width('100%')
+        .textAlign(TextAlign.Start)
         .maxLines(2)
-        .margin({ top: 20 })
+        .margin({ top: 10 })
     }
     .width('100%')
+    .alignItems(HorizontalAlign.Start)
     .padding({ left: 24, right: 24, top: 24, bottom: 26 })
     .backgroundColor(CARD_BACKGROUND)
     .borderRadius(CARD_RADIUS)
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
     .margin({ bottom: 18 })
+  }
+
+  private formatLogSubtitle(subtitle: string): string {
+    const timeSeparator = subtitle.indexOf(' · 时间：');
+    if (timeSeparator >= 0) {
+      return subtitle.substring(0, timeSeparator);
+    }
+    return subtitle;
+  }
+
+  private formatLogTime(timestamp: number): string {
+    if (timestamp <= 0 || Number.isNaN(timestamp)) {
+      return '';
+    }
+
+    const date = new Date(timestamp);
+    const year = String(date.getFullYear());
+    const month = this.padTwoDigits(date.getMonth() + 1);
+    const day = this.padTwoDigits(date.getDate());
+    const hours = this.padTwoDigits(date.getHours());
+    const minutes = this.padTwoDigits(date.getMinutes());
+    const seconds = this.padTwoDigits(date.getSeconds());
+    return year + '-' + month + '-' + day + ' ' + hours + ':' + minutes + ':' + seconds;
+  }
+
+  private padTwoDigits(value: number): string {
+    if (value < 10) {
+      return '0' + String(value);
+    }
+    return String(value);
   }
 }

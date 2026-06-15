@@ -4,6 +4,8 @@ import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   ActiveTunnelInfo,
+  appendAgentLog,
+  buildVpnRestartLogEntry,
   loadAppSplitEnabled,
   loadActiveTunnelInfo,
   loadConfig,
@@ -210,6 +212,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
       NativeTunnel.start(this.tunnelHandle, tunFd);
       hilog.info(DOMAIN, TAG, 'native tunnel started');
+      this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
       this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
@@ -221,6 +224,15 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       throw new Error('Failed to start WireGuard tunnel: ' + this.formatError(error));
     }
     hilog.info(DOMAIN, TAG, 'WireGuard tunnel started');
+  }
+
+  private appendVpnRestartLog(tunnelName: string, createdAt: number): void {
+    appendAgentLog(
+      this.context as common.VpnExtensionContext,
+      buildVpnRestartLogEntry(tunnelName, createdAt)
+    ).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'append vpn restart log failed: %{public}s', this.formatError(err));
+    });
   }
 
   private async resolveConfigText(): Promise<string> {
