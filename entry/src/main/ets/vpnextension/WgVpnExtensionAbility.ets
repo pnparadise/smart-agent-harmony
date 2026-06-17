@@ -23,12 +23,14 @@ import {
   WireGuardConfig
 } from '../wireguard/WireGuardConfig';
 import { NativeTunnel } from '../wireguard/NativeTunnel';
+import { updateVpnDataTransferNotification } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
 const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
+const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 1000;
 const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
 const WANT_ACTION_RESTORE = 'restore';
 
@@ -45,15 +47,15 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private activeTunnelName: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
+  private dataTransferNotificationTimer: number = -1;
+  private lastNotifiedTxBytes: number = -1;
+  private lastNotifiedRxBytes: number = -1;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     if (this.isRefreshStatusWant(want)) {
-      this.restartWireGuard('refreshOnCreate', false).catch((err: BusinessError) => {
-        hilog.error(DOMAIN, TAG, 'refresh startup failed: %{public}s', this.formatError(err));
-        this.publishRuntimeStatus(false, false).catch((statusErr: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, 'publish refresh status after startup failure failed: %{public}s', this.formatError(statusErr));
-        });
+      this.publishRuntimeStatus(false, false).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'publish cold refresh status failed: %{public}s', this.formatError(err));
       });
       return;
     }
@@ -214,6 +216,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       hilog.info(DOMAIN, TAG, 'native tunnel started');
       this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
+      this.startDataTransferNotificationUpdates();
       this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
@@ -470,6 +473,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       String(publishStopped)
     );
     this.stopNetworkObserver();
+    this.stopDataTransferNotificationUpdates();
     this.lastForceHandshakeAt = 0;
 
     if (this.tunnelHandle !== 0) {
@@ -493,6 +497,49 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     hilog.info(DOMAIN, TAG, 'cleanup end');
+  }
+
+  private startDataTransferNotificationUpdates(): void {
+    this.stopDataTransferNotificationUpdates();
+    this.updateDataTransferNotification().catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'initial dataTransfer notification update failed: %{public}s', this.formatError(err));
+    });
+    this.dataTransferNotificationTimer = setInterval(() => {
+      this.updateDataTransferNotification().catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'dataTransfer notification update failed: %{public}s', this.formatError(err));
+      });
+    }, DATA_TRANSFER_NOTIFICATION_INTERVAL_MS);
+  }
+
+  private stopDataTransferNotificationUpdates(): void {
+    if (this.dataTransferNotificationTimer >= 0) {
+      clearInterval(this.dataTransferNotificationTimer);
+      this.dataTransferNotificationTimer = -1;
+    }
+    this.lastNotifiedTxBytes = -1;
+    this.lastNotifiedRxBytes = -1;
+  }
+
+  private async updateDataTransferNotification(): Promise<void> {
+    if (this.tunnelHandle === 0) {
+      return;
+    }
+
+    const stats = NativeTunnel.stats(this.tunnelHandle);
+    const txBytes = stats.txBytes;
+    const rxBytes = stats.rxBytes;
+    if (txBytes === this.lastNotifiedTxBytes && rxBytes === this.lastNotifiedRxBytes) {
+      return;
+    }
+
+    this.lastNotifiedTxBytes = txBytes;
+    this.lastNotifiedRxBytes = rxBytes;
+    await updateVpnDataTransferNotification(
+      this.context as common.VpnExtensionContext,
+      this.activeTunnelName,
+      txBytes,
+      rxBytes
+    );
   }
 
   private startNetworkObserver(): void {
@@ -590,6 +637,18 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         const error = err as BusinessError;
         hilog.warn(DOMAIN, TAG, 'read native stats failed: %{public}s', this.formatError(error));
       }
+    }
+    if (running && (txBytes !== this.lastNotifiedTxBytes || rxBytes !== this.lastNotifiedRxBytes)) {
+      this.lastNotifiedTxBytes = txBytes;
+      this.lastNotifiedRxBytes = rxBytes;
+      updateVpnDataTransferNotification(
+        this.context as common.VpnExtensionContext,
+        this.activeTunnelName,
+        txBytes,
+        rxBytes
+      ).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'publish dataTransfer notification update failed: %{public}s', this.formatError(err));
+      });
     }
 
     const status: TunnelRuntimeStatus = {

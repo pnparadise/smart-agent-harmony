@@ -40,6 +40,7 @@ export interface SplitAppInfo {
 }
 
 const STORE_NAME = 'wg_agent';
+const LOG_STORE_NAME = 'wg_agent_logs';
 const DOMAIN = 0x0001;
 const TAG = 'ConfigStore';
 const LEGACY_CONFIG_KEY = 'wg_quick_config';
@@ -64,7 +65,9 @@ const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
 const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
 const LOG_ENTRIES_KEY = 'wg_log_entries';
+const LOG_CLEARED_AT_KEY = 'wg_log_cleared_at';
 const LAST_VPN_RESTORE_AT_KEY = 'wg_last_vpn_restore_at';
+const DATA_TRANSFER_NOTIFICATION_ID_KEY = 'wg_data_transfer_notification_id';
 const MAX_LOG_ENTRIES = 100;
 export const DEFAULT_DOH_PROVIDER = 'https://dns.alidns.com/dns-query';
 
@@ -80,13 +83,13 @@ export async function saveConfig(context: common.UIAbilityContext, value: string
 }
 
 export async function saveActiveConfig(context: StoreContext, value: string): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(ACTIVE_CONFIG_KEY, value);
   await store.flush();
 }
 
 export async function saveActiveTunnel(context: common.UIAbilityContext, tunnel: TunnelConfig): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(ACTIVE_CONFIG_KEY, tunnel.configText);
   await store.put(ACTIVE_TUNNEL_ID_KEY, tunnel.id);
   await store.put(ACTIVE_TUNNEL_NAME_KEY, tunnel.name);
@@ -102,7 +105,7 @@ export async function saveActiveTunnel(context: common.UIAbilityContext, tunnel:
 }
 
 export async function clearActiveTunnel(context: StoreContext): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.delete(ACTIVE_CONFIG_KEY);
   await store.delete(ACTIVE_TUNNEL_ID_KEY);
   await store.delete(ACTIVE_TUNNEL_NAME_KEY);
@@ -144,6 +147,7 @@ export async function loadActiveTunnelInfo(
 }
 
 export async function loadConfig(context: StoreContext): Promise<string> {
+  await removeStoreFromCache(context);
   const store = await preferences.getPreferences(context, STORE_NAME);
   const activeValue = await store.get(ACTIVE_CONFIG_KEY, '');
   const activeConfig = activeValue as string;
@@ -156,7 +160,7 @@ export async function loadConfig(context: StoreContext): Promise<string> {
 }
 
 export async function saveTunnelRuntimeStatus(context: StoreContext, status: TunnelRuntimeStatus): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   const running = status.running === true;
   const tunnelId = stringValue(status.tunnelId);
   const tunnelName = stringValue(status.tunnelName);
@@ -178,6 +182,30 @@ export async function saveTunnelRuntimeStatus(context: StoreContext, status: Tun
   await store.put(STATUS_LOSS_KEY, loss);
   await store.put(STATUS_RTT_KEY, rttMillis);
   await store.put(STATUS_UPDATED_AT_KEY, updatedAt);
+  await store.flush();
+}
+
+export async function saveDataTransferNotificationId(context: StoreContext, notificationId: number): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(DATA_TRANSFER_NOTIFICATION_ID_KEY, numberValue(notificationId, 0));
+  await store.flush();
+}
+
+export async function loadDataTransferNotificationId(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<number> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return await store.get(DATA_TRANSFER_NOTIFICATION_ID_KEY, 0) as number;
+}
+
+export async function clearDataTransferNotificationId(context: StoreContext): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.delete(DATA_TRANSFER_NOTIFICATION_ID_KEY);
   await store.flush();
 }
 
@@ -206,8 +234,9 @@ export async function loadTunnelRuntimeStatus(
 }
 
 export async function appendAgentLog(context: StoreContext, entry: AgentLogEntry): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
-  const entries = await loadAgentLogsFromStore(store);
+  await removeLogStoreFromCache(context);
+  const store = await preferences.getPreferences(context, LOG_STORE_NAME);
+  const entries = await loadAgentLogsFromLogStore(context, store);
   const normalizedEntry = normalizeAgentLogEntry(entry);
   const nextEntries: AgentLogEntry[] = [normalizedEntry];
   for (let index = 0; index < entries.length && nextEntries.length < MAX_LOG_ENTRIES; index++) {
@@ -226,17 +255,26 @@ export async function loadAgentLogs(
   reloadFromDisk: boolean = false
 ): Promise<AgentLogEntry[]> {
   if (reloadFromDisk) {
-    await removeStoreFromCache(context);
+    await removeLogStoreFromCache(context);
   }
 
-  const store = await preferences.getPreferences(context, STORE_NAME);
-  return await loadAgentLogsFromStore(store);
+  const store = await preferences.getPreferences(context, LOG_STORE_NAME);
+  return await loadAgentLogsFromLogStore(context, store);
 }
 
 export async function clearAgentLogs(context: StoreContext): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
-  await store.delete(LOG_ENTRIES_KEY);
-  await store.flush();
+  await removeLogStoreFromCache(context);
+  const logStore = await preferences.getPreferences(context, LOG_STORE_NAME);
+  await logStore.put(LOG_CLEARED_AT_KEY, Date.now());
+  await logStore.delete(LOG_ENTRIES_KEY);
+  await logStore.flush();
+  await removeLogStoreFromCache(context);
+
+  await removeStoreFromCache(context);
+  const legacyStore = await preferences.getPreferences(context, STORE_NAME);
+  await legacyStore.delete(LOG_ENTRIES_KEY);
+  await legacyStore.flush();
+  await removeStoreFromCache(context);
 }
 
 export function buildVpnRestartLogEntry(tunnelName: string, createdAt: number = Date.now()): AgentLogEntry {
@@ -264,13 +302,13 @@ export async function loadLastVpnRestoreAt(
 }
 
 export async function saveLastVpnRestoreAt(context: StoreContext, value: number): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(LAST_VPN_RESTORE_AT_KEY, numberValue(value, Date.now()));
   await store.flush();
 }
 
 export async function saveAppSplitEnabled(context: StoreContext, enabled: boolean): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(APP_SPLIT_ENABLED_KEY, enabled);
   await store.flush();
   hilog.info(DOMAIN, TAG, 'save app split enabled=%{public}s', String(enabled));
@@ -291,7 +329,7 @@ export async function loadAppSplitEnabled(
 }
 
 export async function saveSelectedSplitApps(context: StoreContext, apps: SplitAppInfo[]): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(APP_SPLIT_APPS_KEY, formatSplitAppList(apps));
   await store.flush();
   hilog.info(DOMAIN, TAG, 'save selected split apps count=%{public}d', apps.length);
@@ -313,7 +351,7 @@ export async function loadSelectedSplitApps(
 }
 
 export async function saveDohSettings(context: StoreContext, settings: DohSettings): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   await store.put(DOH_ENABLED_KEY, settings.enabled);
   await store.put(DOH_PROVIDER_KEY, normalizeDohProvider(settings.provider));
   await store.flush();
@@ -352,9 +390,16 @@ export async function loadDohSettings(
 }
 
 async function removeStoreFromCache(context: StoreContext): Promise<void> {
+  await removePreferencesStoreFromCache(context, STORE_NAME);
+}
+
+async function removeLogStoreFromCache(context: StoreContext): Promise<void> {
+  await removePreferencesStoreFromCache(context, LOG_STORE_NAME);
+}
+
+async function removePreferencesStoreFromCache(context: StoreContext, storeName: string): Promise<void> {
   try {
-    await preferences.removePreferencesFromCache(context, STORE_NAME);
-    hilog.info(DOMAIN, TAG, 'preferences cache removed store=%{public}s', STORE_NAME);
+    await preferences.removePreferencesFromCache(context, storeName);
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'remove preferences cache failed: %{public}s', formatUnknownError(err));
   }
@@ -373,6 +418,7 @@ export function createTunnelId(): string {
 }
 
 export async function loadTunnels(context: common.UIAbilityContext): Promise<TunnelConfig[]> {
+  await removeStoreFromCache(context);
   const store = await preferences.getPreferences(context, STORE_NAME);
   const idsValue = await store.get(TUNNEL_IDS_KEY, '');
   const ids = parseIdList(idsValue as string);
@@ -408,14 +454,14 @@ export async function loadTunnels(context: common.UIAbilityContext): Promise<Tun
 }
 
 export async function saveTunnel(context: common.UIAbilityContext, tunnel: TunnelConfig): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   const idsValue = await store.get(TUNNEL_IDS_KEY, '');
   const ids = parseIdList(idsValue as string);
   await saveTunnelToStore(store, tunnel, ids);
 }
 
 export async function deleteTunnel(context: common.UIAbilityContext, tunnelId: string): Promise<void> {
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForWrite(context);
   const idsValue = await store.get(TUNNEL_IDS_KEY, '');
   const ids = parseIdList(idsValue as string);
   const nextIds: string[] = [];
@@ -429,6 +475,11 @@ export async function deleteTunnel(context: common.UIAbilityContext, tunnelId: s
   await store.delete(TUNNEL_NAME_PREFIX + tunnelId);
   await store.delete(TUNNEL_CONFIG_PREFIX + tunnelId);
   await store.flush();
+}
+
+async function getMainStoreForWrite(context: StoreContext): Promise<preferences.Preferences> {
+  await removeStoreFromCache(context);
+  return await preferences.getPreferences(context, STORE_NAME);
 }
 
 function parseIdList(rawValue: string): string[] {
@@ -494,6 +545,21 @@ function parseSplitAppList(rawValue: string): SplitAppInfo[] {
 async function loadAgentLogsFromStore(store: preferences.Preferences): Promise<AgentLogEntry[]> {
   const rawValue = await store.get(LOG_ENTRIES_KEY, '');
   return parseAgentLogList(rawValue as string);
+}
+
+async function loadAgentLogsFromLogStore(
+  context: StoreContext,
+  logStore: preferences.Preferences
+): Promise<AgentLogEntry[]> {
+  const clearedAt = await logStore.get(LOG_CLEARED_AT_KEY, 0) as number;
+  const entries = await loadAgentLogsFromStore(logStore);
+  if (entries.length > 0 || clearedAt > 0) {
+    return entries;
+  }
+
+  await removeStoreFromCache(context);
+  const legacyStore = await preferences.getPreferences(context, STORE_NAME);
+  return await loadAgentLogsFromStore(legacyStore);
 }
 
 function formatAgentLogList(entries: AgentLogEntry[]): string {

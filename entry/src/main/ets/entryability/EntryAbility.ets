@@ -9,7 +9,7 @@ import {
   saveLastVpnRestoreAt,
   loadTunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
-import { startVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
+import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
 const TAG = 'EntryAbility';
@@ -66,8 +66,14 @@ export default class EntryAbility extends UIAbility {
     const status = await loadTunnelRuntimeStatus(this.context, true);
     const activeInfo = await loadActiveTunnelInfo(this.context, true);
     const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
-    if (!status.running && !hasActiveTunnel) {
-      hilog.info(DOMAIN, TAG, 'skip vpn background task, no running tunnel');
+    if (!status.running) {
+      await stopVpnDataTransferTask(this.context);
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'skip vpn background task, runtime stopped activeTunnel=%{public}s',
+        String(hasActiveTunnel)
+      );
       return;
     }
 

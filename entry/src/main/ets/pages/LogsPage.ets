@@ -14,7 +14,7 @@ export struct LogsPage {
         Scroll() {
           Column() {
             if (this.logs.length === 0) {
-              this.buildEmptyLogCard();
+              this.buildEmptyLogState();
             } else {
               ForEach(this.logs, (entry: AgentLogEntry) => {
                 this.buildLogCard(entry);
@@ -75,7 +75,7 @@ export struct LogsPage {
   }
 
   @Builder
-  private buildEmptyLogCard() {
+  private buildEmptyLogState() {
     Column() {
       Text('暂无日志')
         .fontSize(18)
@@ -87,13 +87,9 @@ export struct LogsPage {
         .margin({ top: 8 })
     }
     .width('100%')
-    .height(100)
-    .justifyContent(FlexAlign.Start)
+    .height(160)
+    .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor(CARD_BACKGROUND)
-    .borderRadius(CARD_RADIUS)
-    .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
-    .padding({ top: 22 })
   }
 
   @Builder

@@ -30,7 +30,7 @@ import {
   TunnelConfig,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
-import { stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
+import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 import { AppPickerPage } from './AppPickerPage';
 import { LogsPage } from './LogsPage';
@@ -907,7 +907,15 @@ struct Index {
     await saveActiveTunnel(context, tunnel);
     hilog.info(DOMAIN, TAG, 'active tunnel saved id=%{public}s name=%{public}s', tunnel.id, tunnel.name);
     await saveTunnelRuntimeStatus(context, this.buildPendingRuntimeStatus(tunnel));
-    await vpnExtension.startVpnExtensionAbility(this.buildWant());
+    await startVpnDataTransferTask(context);
+    try {
+      await vpnExtension.startVpnExtensionAbility(this.buildWant());
+    } catch (err) {
+      await this.stopVpnContinuousTask(context, 'start vpn rollback');
+      await saveTunnelRuntimeStatus(context, this.buildStoppedRuntimeStatus());
+      const error = err as BusinessError;
+      throw new Error(error.message ?? JSON.stringify(err));
+    }
     this.vpnEnabled = true;
     this.activeTunnelId = tunnel.id;
     this.runtimeRunning = true;
@@ -1067,17 +1075,15 @@ struct Index {
       const activeInfo: ActiveTunnelInfo = await loadActiveTunnelInfo(context, true);
       this.logs = await loadAgentLogs(context, true);
       let status: TunnelRuntimeStatus = await loadTunnelRuntimeStatus(context, true);
-      const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
-      if (status.running || this.runtimeRunning || this.vpnEnabled || hasActiveTunnel) {
+      const wasRunning = this.runtimeRunning || this.vpnEnabled || status.running;
+      if (wasRunning || this.startingTunnelId.length > 0) {
         await this.requestRuntimeStatusRefresh();
         await this.sleep(150);
         status = await loadTunnelRuntimeStatus(context, true);
       }
 
-      const wasRunning = this.runtimeRunning;
       const pendingStart = this.isStartupGraceActive(status);
-      const restoring = hasActiveTunnel && !status.running;
-      const running = status.running || pendingStart || restoring;
+      const running = status.running || pendingStart;
       const hasRuntimeStats = running;
 
       const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status, activeInfo.id) : '';
@@ -1093,7 +1099,7 @@ struct Index {
       this.runtimeUpdatedAt = status.updatedAt;
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
-      if (status.running || restoring) {
+      if (status.running) {
         this.runtimeConfirmedRunning = true;
         this.startingTunnelId = resolvedTunnelId;
         this.startingTunnelName = resolvedTunnelName;
@@ -1107,6 +1113,10 @@ struct Index {
         await this.stopVpnContinuousTask(context, 'runtime stopped');
         this.statusText = 'Stopped';
         hilog.info(DOMAIN, TAG, 'runtime transitioned to stopped');
+      } else if (wasRunning && !running && !this.busy) {
+        await this.stopVpnContinuousTask(context, 'runtime stopped');
+        this.statusText = 'Stopped';
+        hilog.info(DOMAIN, TAG, 'runtime reported stopped');
       } else if (!running && !this.runtimeConfirmedRunning) {
         this.statusText = 'Stopped';
       }
