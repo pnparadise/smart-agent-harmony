@@ -34,6 +34,17 @@ export interface AgentLogEntry {
   createdAt: number;
 }
 
+export type AgentRuleType = 'wifiGateway' | 'wifiSsid' | 'ipv6Available' | 'ipv4Available';
+
+export interface AgentRule {
+  id: string;
+  type: AgentRuleType;
+  matchValue: string;
+  targetTunnelId: string;
+  targetTunnelName: string;
+  enabled: boolean;
+}
+
 export interface SplitAppInfo {
   bundleName: string;
   label: string;
@@ -62,6 +73,8 @@ const STATUS_RTT_KEY = 'wg_status_rtt_millis';
 const STATUS_UPDATED_AT_KEY = 'wg_status_updated_at';
 const APP_SPLIT_ENABLED_KEY = 'wg_app_split_enabled';
 const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
+const SMART_AGENT_ENABLED_KEY = 'wg_smart_agent_enabled';
+const SMART_AGENT_RULES_KEY = 'wg_smart_agent_rules';
 const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
 const LOG_ENTRIES_KEY = 'wg_log_entries';
@@ -289,6 +302,10 @@ export function buildVpnRestartLogEntry(tunnelName: string, createdAt: number = 
   return entry;
 }
 
+export function createAgentRuleId(): string {
+  return 'rule_' + String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
+}
+
 export async function loadLastVpnRestoreAt(
   context: StoreContext,
   reloadFromDisk: boolean = false
@@ -348,6 +365,49 @@ export async function loadSelectedSplitApps(
   const apps = parseSplitAppList(rawValue as string);
   hilog.info(DOMAIN, TAG, 'load selected split apps count=%{public}d', apps.length);
   return apps;
+}
+
+export async function saveSmartAgentEnabled(context: StoreContext, enabled: boolean): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(SMART_AGENT_ENABLED_KEY, enabled);
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save smart agent enabled=%{public}s', String(enabled));
+}
+
+export async function loadSmartAgentEnabled(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<boolean> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const enabled = await store.get(SMART_AGENT_ENABLED_KEY, false) as boolean;
+  hilog.info(DOMAIN, TAG, 'load smart agent enabled=%{public}s', String(enabled));
+  return enabled;
+}
+
+export async function saveAgentRules(context: StoreContext, rules: AgentRule[]): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(SMART_AGENT_RULES_KEY, formatAgentRuleList(rules));
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save smart agent rules count=%{public}d', rules.length);
+}
+
+export async function loadAgentRules(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<AgentRule[]> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const rawValue = await store.get(SMART_AGENT_RULES_KEY, '');
+  const rules = parseAgentRuleList(rawValue as string);
+  hilog.info(DOMAIN, TAG, 'load smart agent rules count=%{public}d', rules.length);
+  return rules;
 }
 
 export async function saveDohSettings(context: StoreContext, settings: DohSettings): Promise<void> {
@@ -540,6 +600,87 @@ function parseSplitAppList(rawValue: string): SplitAppInfo[] {
     }
   }
   return apps;
+}
+
+function formatAgentRuleList(rules: AgentRule[]): string {
+  const lines: string[] = [];
+  for (let index = 0; index < rules.length; index++) {
+    const rule = normalizeAgentRule(rules[index]);
+    if (rule.id.length > 0) {
+      lines.push(
+        encodeURIComponent(rule.id) + '\t' +
+        encodeURIComponent(rule.type) + '\t' +
+        encodeURIComponent(rule.matchValue) + '\t' +
+        encodeURIComponent(rule.targetTunnelId) + '\t' +
+        encodeURIComponent(rule.targetTunnelName) + '\t' +
+        String(rule.enabled)
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+function parseAgentRuleList(rawValue: string): AgentRule[] {
+  if (rawValue.length === 0) {
+    return [];
+  }
+
+  const lines = rawValue.split('\n');
+  const rules: AgentRule[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.length === 0) {
+      continue;
+    }
+
+    const parts = line.split('\t');
+    if (parts.length < 6) {
+      continue;
+    }
+
+    try {
+      const rule: AgentRule = {
+        id: decodeURIComponent(parts[0]),
+        type: normalizeAgentRuleType(decodeURIComponent(parts[1])),
+        matchValue: decodeURIComponent(parts[2]),
+        targetTunnelId: decodeURIComponent(parts[3]),
+        targetTunnelName: decodeURIComponent(parts[4]),
+        enabled: parts[5] === 'true'
+      };
+      const normalized = normalizeAgentRule(rule);
+      if (normalized.id.length > 0) {
+        rules.push(normalized);
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'parse smart agent rule failed: %{public}s', formatUnknownError(err));
+    }
+  }
+  return rules;
+}
+
+function normalizeAgentRule(rule: AgentRule): AgentRule {
+  const normalized: AgentRule = {
+    id: stringValue(rule.id),
+    type: normalizeAgentRuleType(rule.type),
+    matchValue: stringValue(rule.matchValue).trim(),
+    targetTunnelId: stringValue(rule.targetTunnelId),
+    targetTunnelName: stringValue(rule.targetTunnelName).trim(),
+    enabled: rule.enabled === true
+  };
+  return normalized;
+}
+
+function normalizeAgentRuleType(value: string): AgentRuleType {
+  if (value === 'wifiSsid') {
+    return 'wifiSsid';
+  }
+  if (value === 'ipv6Available') {
+    return 'ipv6Available';
+  }
+  if (value === 'ipv4Available') {
+    return 'ipv4Available';
+  }
+  return 'wifiGateway';
 }
 
 async function loadAgentLogsFromStore(store: preferences.Preferences): Promise<AgentLogEntry[]> {

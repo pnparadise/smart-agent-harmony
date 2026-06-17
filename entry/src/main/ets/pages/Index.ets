@@ -8,22 +8,28 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import {
   ActiveTunnelInfo,
   AgentLogEntry,
+  AgentRule,
   clearAgentLogs,
   clearActiveTunnel,
+  createAgentRuleId,
   createTunnelId,
   deleteTunnel,
   DEFAULT_DOH_PROVIDER,
+  loadAgentRules,
   loadActiveTunnelInfo,
   loadAgentLogs,
   loadAppSplitEnabled,
   loadDohSettings,
   loadSelectedSplitApps,
+  loadSmartAgentEnabled,
   loadTunnelRuntimeStatus,
   loadTunnels,
+  saveAgentRules,
   saveActiveTunnel,
   saveAppSplitEnabled,
   saveDohSettings,
   saveSelectedSplitApps,
+  saveSmartAgentEnabled,
   saveTunnelRuntimeStatus,
   saveTunnel,
   SplitAppInfo,
@@ -110,6 +116,7 @@ struct Index {
   @State private currentTabIndex: number = TAB_TUNNELS;
   @State private appSplitEnabled: boolean = false;
   @State private smartAgentEnabled: boolean = false;
+  @State private agentRules: AgentRule[] = [];
   @State private dohEnabled: boolean = true;
   @State private dohProvider: string = DEFAULT_DOH_PROVIDER;
   @State private selectedSplitApps: SplitAppInfo[] = [];
@@ -132,6 +139,7 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'aboutToAppear');
     this.loadTunnelList();
     this.loadAppSplitSettings();
+    this.loadSmartAgentSettings();
     this.loadDohSettings();
     this.loadLogs();
     this.refreshRuntimeStatus();
@@ -391,6 +399,8 @@ struct Index {
           RulesPage({
             appSplitEnabled: this.appSplitEnabled,
             smartAgentEnabled: this.smartAgentEnabled,
+            agentRules: this.agentRules,
+            tunnels: this.tunnels,
             dohEnabled: this.dohEnabled,
             dohProvider: this.dohProvider,
             selectedSplitAppCount: this.selectedSplitApps.length,
@@ -400,15 +410,32 @@ struct Index {
               });
             },
             onToggleSmartAgent: () => {
-              this.smartAgentEnabled = !this.smartAgentEnabled;
+              this.toggleSmartAgent().catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onSaveAgentRule: (rule: AgentRule) => {
+              this.saveAgentRuleFromPage(rule).catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onDeleteAgentRule: (ruleId: string) => {
+              this.deleteAgentRuleFromPage(ruleId).catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onReorderAgentRule: (ruleId: string, targetIndex: number) => {
+              this.reorderAgentRuleFromPage(ruleId, targetIndex).catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
             },
             onToggleDoh: () => {
               this.toggleDohEnabled().catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
-            onRotateDohProvider: () => {
-              this.rotateDohProvider().catch((err: BusinessError) => {
+            onSelectDohProvider: (provider: string) => {
+              this.selectDohProvider(provider).catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
@@ -557,6 +584,17 @@ struct Index {
     }
   }
 
+  private async loadSmartAgentSettings(): Promise<void> {
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      this.smartAgentEnabled = await loadSmartAgentEnabled(context, true);
+      this.agentRules = await loadAgentRules(context, true);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load smart agent settings failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
   private async loadDohSettings(): Promise<void> {
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -567,6 +605,96 @@ struct Index {
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'load doh settings failed: %{public}s', error.message ?? JSON.stringify(err));
     }
+  }
+
+  private async toggleSmartAgent(): Promise<void> {
+    const nextEnabled = !this.smartAgentEnabled;
+    this.smartAgentEnabled = nextEnabled;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveSmartAgentEnabled(context, nextEnabled);
+    await this.restartVpnIfRunning('smart agent toggle');
+  }
+
+  private async saveAgentRuleFromPage(rule: AgentRule): Promise<void> {
+    const normalizedRule = this.normalizeAgentRuleForSave(rule);
+    if (normalizedRule.targetTunnelId.length > 0) {
+      normalizedRule.targetTunnelName = this.resolveTunnelName(normalizedRule.targetTunnelId, normalizedRule.targetTunnelName);
+    }
+
+    const nextRules: AgentRule[] = [];
+    let found = false;
+    for (let index = 0; index < this.agentRules.length; index++) {
+      const existing = this.agentRules[index];
+      if (existing.id === normalizedRule.id) {
+        nextRules.push(normalizedRule);
+        found = true;
+      } else {
+        nextRules.push(existing);
+      }
+    }
+    if (!found) {
+      nextRules.push(normalizedRule);
+    }
+
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveAgentRules(context, nextRules);
+    this.agentRules = nextRules;
+    await this.restartVpnIfRunning('smart agent rules');
+  }
+
+  private async deleteAgentRuleFromPage(ruleId: string): Promise<void> {
+    const nextRules: AgentRule[] = [];
+    for (let index = 0; index < this.agentRules.length; index++) {
+      const rule = this.agentRules[index];
+      if (rule.id !== ruleId) {
+        nextRules.push(rule);
+      }
+    }
+
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveAgentRules(context, nextRules);
+    this.agentRules = nextRules;
+    await this.restartVpnIfRunning('smart agent rules');
+  }
+
+  private async reorderAgentRuleFromPage(ruleId: string, targetIndex: number): Promise<void> {
+    const currentIndex = this.indexOfAgentRule(ruleId);
+    if (currentIndex < 0) {
+      return;
+    }
+
+    if (targetIndex < 0 || targetIndex >= this.agentRules.length) {
+      return;
+    }
+
+    const nextRules: AgentRule[] = [];
+    for (let index = 0; index < this.agentRules.length; index++) {
+      if (index !== currentIndex) {
+        nextRules.push(this.agentRules[index]);
+      }
+    }
+
+    const insertIndex = targetIndex;
+    if (insertIndex >= nextRules.length) {
+      nextRules.push(this.agentRules[currentIndex]);
+    } else {
+      const reorderedRules: AgentRule[] = [];
+      for (let index = 0; index < nextRules.length; index++) {
+        if (index === insertIndex) {
+          reorderedRules.push(this.agentRules[currentIndex]);
+        }
+        reorderedRules.push(nextRules[index]);
+      }
+      nextRules.length = 0;
+      for (let index = 0; index < reorderedRules.length; index++) {
+        nextRules.push(reorderedRules[index]);
+      }
+    }
+
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveAgentRules(context, nextRules);
+    this.agentRules = nextRules;
+    await this.restartVpnIfRunning('smart agent rule order');
   }
 
   private async toggleDohEnabled(): Promise<void> {
@@ -787,6 +915,38 @@ struct Index {
       }
     }
     return false;
+  }
+
+  private normalizeAgentRuleForSave(rule: AgentRule): AgentRule {
+    const normalizedId = rule.id.length > 0 ? rule.id : createAgentRuleId();
+    const normalized: AgentRule = {
+      id: normalizedId,
+      type: rule.type,
+      matchValue: rule.matchValue.trim(),
+      targetTunnelId: rule.targetTunnelId,
+      targetTunnelName: rule.targetTunnelName.trim(),
+      enabled: rule.enabled
+    };
+    return normalized;
+  }
+
+  private indexOfAgentRule(ruleId: string): number {
+    for (let index = 0; index < this.agentRules.length; index++) {
+      if (this.agentRules[index].id === ruleId) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  private resolveTunnelName(tunnelId: string, fallbackName: string): string {
+    for (let index = 0; index < this.tunnels.length; index++) {
+      const tunnel = this.tunnels[index];
+      if (tunnel.id === tunnelId) {
+        return tunnel.name;
+      }
+    }
+    return fallbackName;
   }
 
   private async saveEditingTunnel(): Promise<void> {
@@ -1271,14 +1431,11 @@ struct Index {
     return tabWidth * this.tabIndicatorProgress + (tabWidth - 48) / 2;
   }
 
-  private async rotateDohProvider(): Promise<void> {
-    if (this.dohProvider === 'https://dns.alidns.com/dns-query') {
-      this.dohProvider = 'https://cloudflare-dns.com/dns-query';
-    } else if (this.dohProvider === 'https://cloudflare-dns.com/dns-query') {
-      this.dohProvider = 'https://dns.google/dns-query';
-    } else {
-      this.dohProvider = 'https://dns.alidns.com/dns-query';
+  private async selectDohProvider(provider: string): Promise<void> {
+    if (provider.length === 0 || this.dohProvider === provider) {
+      return;
     }
+    this.dohProvider = provider;
     const context = getContext(this) as common.UIAbilityContext;
     await saveDohSettings(context, {
       enabled: this.dohEnabled,
