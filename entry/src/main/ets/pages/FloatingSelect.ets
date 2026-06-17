@@ -47,7 +47,8 @@ export struct FloatingSelect {
       }
     }
     .width('100%')
-    .height(this.fieldStackHeight())
+    .height(this.selectStackHeight())
+    .margin({ bottom: this.selectStackBottomMargin() })
   }
 
   @Builder
@@ -153,6 +154,20 @@ export struct FloatingSelect {
       return 64;
     }
     return 52;
+  }
+
+  private selectStackHeight(): number {
+    if (this.expanded) {
+      return this.menuTop + this.menuHeight();
+    }
+    return this.fieldStackHeight();
+  }
+
+  private selectStackBottomMargin(): number {
+    if (this.expanded) {
+      return this.fieldStackHeight() - this.selectStackHeight();
+    }
+    return 0;
   }
 
   private menuHeight(): number {

@@ -691,9 +691,9 @@ struct Index {
       }
     }
 
+    this.agentRules = nextRules;
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
-    this.agentRules = nextRules;
     await this.restartVpnIfRunning('smart agent rule order');
   }
 

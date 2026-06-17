@@ -38,6 +38,8 @@ export struct RulesPage {
   @State private agentRuleNotice: string = '';
   @State private draggingAgentRuleId: string = '';
   @State private dragHoverAgentRuleId: string = '';
+  @State private dragAgentRuleOrderIds: string[] = [];
+  @State private suppressAgentRuleCardClick: boolean = false;
   @State private agentRuleDropdown: string = AGENT_RULE_DROPDOWN_NONE;
   @State private dohDropdownExpanded: boolean = false;
   onToggleAppSplit: () => void = () => {};
@@ -176,7 +178,7 @@ export struct RulesPage {
   @Builder
   private buildAgentRuleList() {
     Column() {
-      ForEach(this.agentRules, (rule: AgentRule) => {
+      ForEach(this.displayedAgentRules(), (rule: AgentRule) => {
         this.buildAgentRuleCard(rule);
       }, (rule: AgentRule) => rule.id)
 
@@ -203,7 +205,7 @@ export struct RulesPage {
   private buildAgentRuleSummaryCard(rule: AgentRule) {
     Row() {
       Row() {
-        this.buildAgentRuleIcon(rule.type, false);
+        this.buildAgentRuleIcon(rule.type);
       }
       .width(56)
       .height(56)
@@ -212,9 +214,6 @@ export struct RulesPage {
       .backgroundColor('#F6F7F9')
       .borderRadius(12)
       .margin({ right: 20 })
-      .onClick(() => {
-        this.openAgentRuleEditor(rule);
-      })
 
       Column() {
         Text(this.agentRuleTitle(rule))
@@ -230,9 +229,6 @@ export struct RulesPage {
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
-      .onClick(() => {
-        this.openAgentRuleEditor(rule);
-      })
 
       Button() {
         Image($r('app.media.ic_edit_gray'))
@@ -246,14 +242,11 @@ export struct RulesPage {
         .backgroundColor('#00000000')
         .borderRadius(10)
         .margin({ left: 6 })
-        .onClick(() => {
-          this.openAgentRuleEditor(rule);
-        })
 
       Row() {
         Image($r('app.media.ic_drag_gray'))
           .width(24)
-          .height(44)
+          .height(24)
       }
       .width(34)
       .height(56)
@@ -262,12 +255,10 @@ export struct RulesPage {
       .margin({ left: 2 })
       .draggable(true)
       .onDragStart(() => {
-        this.resetAgentRuleEditState();
-        this.draggingAgentRuleId = rule.id;
-        this.dragHoverAgentRuleId = '';
+        this.startAgentRuleDrag(rule.id);
       })
       .onDragEnd(() => {
-        this.clearAgentRuleDrag();
+        this.endAgentRuleDrag();
       })
     }
     .width('100%')
@@ -284,14 +275,20 @@ export struct RulesPage {
       color: PRIMARY_BLUE,
       radius: CARD_RADIUS
     })
+    .onClick(() => {
+      if (this.suppressAgentRuleCardClick || this.draggingAgentRuleId.length > 0) {
+        return;
+      }
+      this.openAgentRuleEditor(rule);
+    })
     .onDragEnter(() => {
-      this.updateDragHoverRule(rule.id);
+      this.previewAgentRuleDrop(rule.id);
     })
     .onDragMove(() => {
-      this.updateDragHoverRule(rule.id);
+      this.previewAgentRuleDrop(rule.id);
     })
     .onDrop(() => {
-      this.dropAgentRuleOn(rule.id);
+      this.commitAgentRuleDrop();
     })
   }
 
@@ -344,7 +341,7 @@ export struct RulesPage {
     Column() {
       Row() {
         Row() {
-          this.buildAgentRuleIcon(this.draftAgentRuleType, false);
+          this.buildAgentRuleIcon(this.draftAgentRuleType);
         }
         .width(56)
         .height(56)
@@ -353,6 +350,9 @@ export struct RulesPage {
         .backgroundColor('#F6F7F9')
         .borderRadius(12)
         .margin({ right: 20 })
+        .onClick(() => {
+          this.cancelAgentRuleEdit();
+        })
 
         Column() {
           Text(isCreate ? 'Add Tunnel Rule' : this.draftAgentRuleTitle())
@@ -360,11 +360,17 @@ export struct RulesPage {
             .fontWeight(FontWeight.Bold)
             .fontColor(TEXT_PRIMARY)
             .maxLines(1)
+            .onClick(() => {
+              this.cancelAgentRuleEdit();
+            })
           Text('Target: ' + this.draftTargetTunnelLabel())
             .fontSize(14)
             .fontColor(TEXT_SECONDARY)
             .maxLines(1)
             .margin({ top: 8 })
+            .onClick(() => {
+              this.cancelAgentRuleEdit();
+            })
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -373,6 +379,8 @@ export struct RulesPage {
         })
       }
       .width('100%')
+      .height(56)
+      .alignItems(VerticalAlign.Center)
 
       Divider()
         .strokeWidth(1)
@@ -505,7 +513,7 @@ export struct RulesPage {
       .margin({ top: 22 })
     }
     .width('100%')
-    .padding({ left: 24, right: 24, top: 24, bottom: 24 })
+    .padding({ left: 24, right: 24, top: 22, bottom: 24 })
     .backgroundColor(CARD_BACKGROUND)
     .borderRadius(CARD_RADIUS)
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
@@ -574,15 +582,15 @@ export struct RulesPage {
   }
 
   @Builder
-  private buildAgentRuleIcon(ruleType: AgentRuleType, active: boolean) {
+  private buildAgentRuleIcon(ruleType: AgentRuleType) {
     if (ruleType === 'wifiGateway' || ruleType === 'wifiSsid') {
       Image($r('app.media.ic_wifi_blue'))
-        .width(active ? 34 : 32)
-        .height(active ? 34 : 32)
+        .width(32)
+        .height(32)
     } else {
       Image($r('app.media.ic_globe_gray'))
-        .width(active ? 34 : 32)
-        .height(active ? 34 : 32)
+        .width(32)
+        .height(32)
     }
   }
 
@@ -857,33 +865,77 @@ export struct RulesPage {
     this.agentRuleNotice = '';
   }
 
-  private updateDragHoverRule(ruleId: string): void {
-    if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === ruleId) {
-      return;
-    }
-    this.dragHoverAgentRuleId = ruleId;
+  private startAgentRuleDrag(ruleId: string): void {
+    this.resetAgentRuleEditState();
+    this.draggingAgentRuleId = ruleId;
+    this.dragHoverAgentRuleId = '';
+    this.dragAgentRuleOrderIds = this.currentAgentRuleIds();
+    this.suppressAgentRuleCardClick = true;
   }
 
-  private dropAgentRuleOn(targetRuleId: string): void {
+  private previewAgentRuleDrop(targetRuleId: string): void {
     if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === targetRuleId) {
-      this.clearAgentRuleDrag();
       return;
     }
 
-    const fromIndex = this.agentRuleIndex(this.draggingAgentRuleId);
-    const toIndex = this.agentRuleIndex(targetRuleId);
+    const orderIds = this.activeDragAgentRuleOrderIds();
+    const fromIndex = this.agentRuleIdIndexIn(this.draggingAgentRuleId, orderIds);
+    const toIndex = this.agentRuleIdIndexIn(targetRuleId, orderIds);
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
-      this.clearAgentRuleDrag();
       return;
     }
 
-    this.onReorderAgentRule(this.draggingAgentRuleId, toIndex);
-    this.clearAgentRuleDrag();
+    const nextOrderIds: string[] = [];
+    for (let index = 0; index < orderIds.length; index++) {
+      if (index !== fromIndex) {
+        nextOrderIds.push(orderIds[index]);
+      }
+    }
+    if (toIndex >= nextOrderIds.length) {
+      nextOrderIds.push(this.draggingAgentRuleId);
+    } else {
+      const reorderedIds: string[] = [];
+      for (let index = 0; index < nextOrderIds.length; index++) {
+        if (index === toIndex) {
+          reorderedIds.push(this.draggingAgentRuleId);
+        }
+        reorderedIds.push(nextOrderIds[index]);
+      }
+      nextOrderIds.length = 0;
+      for (let index = 0; index < reorderedIds.length; index++) {
+        nextOrderIds.push(reorderedIds[index]);
+      }
+    }
+
+    this.runAgentRuleAnimation(() => {
+      this.dragHoverAgentRuleId = targetRuleId;
+      this.dragAgentRuleOrderIds = nextOrderIds;
+    });
   }
 
-  private clearAgentRuleDrag(): void {
+  private commitAgentRuleDrop(): void {
+    if (this.draggingAgentRuleId.length === 0) {
+      this.endAgentRuleDrag();
+      return;
+    }
+
+    const originalIndex = this.agentRuleIndex(this.draggingAgentRuleId);
+    const targetIndex = this.agentRuleIdIndexIn(this.draggingAgentRuleId, this.activeDragAgentRuleOrderIds());
+    if (originalIndex >= 0 && targetIndex >= 0 && originalIndex !== targetIndex) {
+      this.onReorderAgentRule(this.draggingAgentRuleId, targetIndex);
+    }
+
+    this.endAgentRuleDrag();
+  }
+
+  private endAgentRuleDrag(): void {
     this.draggingAgentRuleId = '';
     this.dragHoverAgentRuleId = '';
+    this.dragAgentRuleOrderIds = [];
+    this.suppressAgentRuleCardClick = true;
+    setTimeout(() => {
+      this.suppressAgentRuleCardClick = false;
+    }, 120);
   }
 
   private resetAgentRuleEditState(): void {
@@ -896,11 +948,73 @@ export struct RulesPage {
     this.agentRuleNotice = '';
     this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
     this.dohDropdownExpanded = false;
+    this.draggingAgentRuleId = '';
+    this.dragHoverAgentRuleId = '';
+    this.dragAgentRuleOrderIds = [];
+    this.suppressAgentRuleCardClick = false;
   }
 
   private agentRuleIndex(ruleId: string): number {
     for (let index = 0; index < this.agentRules.length; index++) {
       if (this.agentRules[index].id === ruleId) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  private displayedAgentRules(): AgentRule[] {
+    if (!this.hasValidDragAgentRuleOrderIds()) {
+      return this.agentRules;
+    }
+
+    const orderedRules: AgentRule[] = [];
+    for (let orderIndex = 0; orderIndex < this.dragAgentRuleOrderIds.length; orderIndex++) {
+      const ruleId = this.dragAgentRuleOrderIds[orderIndex];
+      for (let ruleIndex = 0; ruleIndex < this.agentRules.length; ruleIndex++) {
+        const rule = this.agentRules[ruleIndex];
+        if (rule.id === ruleId) {
+          orderedRules.push(rule);
+          break;
+        }
+      }
+    }
+    if (orderedRules.length !== this.agentRules.length) {
+      return this.agentRules;
+    }
+    return orderedRules;
+  }
+
+  private currentAgentRuleIds(): string[] {
+    const ruleIds: string[] = [];
+    for (let index = 0; index < this.agentRules.length; index++) {
+      ruleIds.push(this.agentRules[index].id);
+    }
+    return ruleIds;
+  }
+
+  private activeDragAgentRuleOrderIds(): string[] {
+    if (this.hasValidDragAgentRuleOrderIds()) {
+      return this.dragAgentRuleOrderIds;
+    }
+    return this.currentAgentRuleIds();
+  }
+
+  private hasValidDragAgentRuleOrderIds(): boolean {
+    if (this.dragAgentRuleOrderIds.length !== this.agentRules.length || this.dragAgentRuleOrderIds.length === 0) {
+      return false;
+    }
+    for (let index = 0; index < this.agentRules.length; index++) {
+      if (this.agentRuleIdIndexIn(this.agentRules[index].id, this.dragAgentRuleOrderIds) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private agentRuleIdIndexIn(ruleId: string, ruleIds: string[]): number {
+    for (let index = 0; index < ruleIds.length; index++) {
+      if (ruleIds[index] === ruleId) {
         return index;
       }
     }
