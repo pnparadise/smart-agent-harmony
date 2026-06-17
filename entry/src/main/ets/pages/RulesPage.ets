@@ -874,7 +874,8 @@ export struct RulesPage {
   }
 
   private previewAgentRuleDrop(targetRuleId: string): void {
-    if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === targetRuleId) {
+    if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === targetRuleId ||
+      this.dragHoverAgentRuleId === targetRuleId) {
       return;
     }
 
