@@ -1,3 +1,4 @@
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AgentRule, AgentRuleType, TunnelConfig } from '../wireguard/ConfigStore';
 import { FloatingSelect, FloatingSelectOption } from './FloatingSelect';
 import {
@@ -15,10 +16,17 @@ const AGENT_RULE_TYPES: AgentRuleType[] = ['wifiGateway', 'wifiSsid', 'ipv6Avail
 const AGENT_RULE_DROPDOWN_NONE = '';
 const AGENT_RULE_DROPDOWN_TYPE = 'type';
 const AGENT_RULE_DROPDOWN_TARGET = 'target';
+const DOH_PREFIX = 'https://';
+const DOH_SUFFIX = '/dns-query';
 const DOH_PROVIDER_ALIYUN = 'https://dns.alidns.com/dns-query';
 const DOH_PROVIDER_GOOGLE = 'https://dns.google/dns-query';
 const DOH_PROVIDER_CLOUDFLARE = 'https://cloudflare-dns.com/dns-query';
 const DOH_PROVIDER_TENCENT = 'https://doh.pub/dns-query';
+const DOMAIN = 0x0001;
+const TAG = 'RulesPage';
+const AGENT_RULE_CARD_HEIGHT = 100;
+const AGENT_RULE_CARD_GAP = 12;
+const AGENT_RULE_DRAG_ROW_HEIGHT = AGENT_RULE_CARD_HEIGHT + AGENT_RULE_CARD_GAP;
 
 @Component
 export struct RulesPage {
@@ -42,6 +50,11 @@ export struct RulesPage {
   @State private suppressAgentRuleCardClick: boolean = false;
   @State private agentRuleDropdown: string = AGENT_RULE_DROPDOWN_NONE;
   @State private dohDropdownExpanded: boolean = false;
+  private suppressAgentRuleCardClickToken: number = 0;
+  private agentRuleDropCommitted: boolean = false;
+  private agentRuleDragSequence: number = 0;
+  private agentRuleDragStartIndex: number = -1;
+  private agentRuleDragLastTargetIndex: number = -1;
   onToggleAppSplit: () => void = () => {};
   onToggleSmartAgent: () => void = () => {};
   onSaveAgentRule: (rule: AgentRule) => void = () => {};
@@ -68,6 +81,7 @@ export struct RulesPage {
       }
       .width('100%')
       .padding({ left: 20, right: 20, top: 30, bottom: 20 })
+      .clip(false)
     }
     .width('100%')
     .height('100%')
@@ -189,6 +203,8 @@ export struct RulesPage {
       }
     }
     .width('100%')
+    .clip(false)
+    .zIndex(this.agentRuleDropdown === AGENT_RULE_DROPDOWN_NONE ? 1 : 130)
     .animation({ duration: 240, curve: Curve.EaseInOut })
   }
 
@@ -253,13 +269,29 @@ export struct RulesPage {
       .justifyContent(FlexAlign.Center)
       .alignItems(VerticalAlign.Center)
       .margin({ left: 2 })
-      .draggable(true)
-      .onDragStart(() => {
-        this.startAgentRuleDrag(rule.id);
-      })
-      .onDragEnd(() => {
-        this.endAgentRuleDrag();
-      })
+      .priorityGesture(
+        PanGesture({ direction: PanDirection.Vertical, distance: 1 })
+          .onActionStart(() => {
+            hilog.info(DOMAIN, TAG, 'agent pan start callback seq=%{public}d ruleId=%{public}s',
+              this.agentRuleDragSequence + 1, rule.id);
+            this.startAgentRuleDrag(rule.id);
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.updateAgentRulePanDrag(rule.id, event.offsetY);
+          })
+          .onActionEnd(() => {
+            hilog.info(DOMAIN, TAG,
+              'agent pan end callback seq=%{public}d ruleId=%{public}s dragging=%{public}s',
+              this.agentRuleDragSequence, rule.id, this.draggingAgentRuleId);
+            this.endAgentRuleDrag();
+          })
+          .onActionCancel(() => {
+            hilog.info(DOMAIN, TAG,
+              'agent pan cancel callback seq=%{public}d ruleId=%{public}s dragging=%{public}s',
+              this.agentRuleDragSequence, rule.id, this.draggingAgentRuleId);
+            this.endAgentRuleDrag();
+          })
+      )
     }
     .width('100%')
     .height(100)
@@ -268,7 +300,7 @@ export struct RulesPage {
     .backgroundColor(CARD_BACKGROUND)
     .borderRadius(CARD_RADIUS)
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
-    .margin({ bottom: 18 })
+    .margin({ bottom: AGENT_RULE_CARD_GAP })
     .opacity(this.draggingAgentRuleId === rule.id ? 0.55 : 1)
     .border({
       width: this.dragHoverAgentRuleId === rule.id && this.draggingAgentRuleId !== rule.id ? 1 : 0,
@@ -277,18 +309,18 @@ export struct RulesPage {
     })
     .onClick(() => {
       if (this.suppressAgentRuleCardClick || this.draggingAgentRuleId.length > 0) {
+        hilog.info(
+          DOMAIN,
+          TAG,
+          'agent card click suppressed ruleId=%{public}s suppress=%{public}s dragging=%{public}s',
+          rule.id,
+          String(this.suppressAgentRuleCardClick),
+          this.draggingAgentRuleId
+        );
         return;
       }
+      hilog.info(DOMAIN, TAG, 'agent card click open ruleId=%{public}s', rule.id);
       this.openAgentRuleEditor(rule);
-    })
-    .onDragEnter(() => {
-      this.previewAgentRuleDrop(rule.id);
-    })
-    .onDragMove(() => {
-      this.previewAgentRuleDrop(rule.id);
-    })
-    .onDrop(() => {
-      this.commitAgentRuleDrop();
     })
   }
 
@@ -330,7 +362,7 @@ export struct RulesPage {
     .backgroundColor(CARD_BACKGROUND)
     .borderRadius(CARD_RADIUS)
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
-    .margin({ bottom: 18 })
+    .margin({ bottom: AGENT_RULE_CARD_GAP })
     .onClick(() => {
       this.openCreateAgentRuleEditor();
     })
@@ -377,6 +409,24 @@ export struct RulesPage {
         .onClick(() => {
           this.cancelAgentRuleEdit();
         })
+
+        if (!isCreate) {
+          Button() {
+            Image($r('app.media.ic_delete_gray'))
+              .width(24)
+              .height(24)
+          }
+            .type(ButtonType.Normal)
+            .width(40)
+            .height(40)
+            .padding(0)
+            .backgroundColor('#00000000')
+            .borderRadius(10)
+            .margin({ left: 8 })
+            .onClick(() => {
+              this.deleteEditingAgentRule();
+            })
+        }
       }
       .width('100%')
       .height(56)
@@ -458,23 +508,6 @@ export struct RulesPage {
       }
 
       Row() {
-        if (!isCreate) {
-          Button() {
-            Image($r('app.media.ic_delete_red'))
-              .width(22)
-              .height(22)
-          }
-            .type(ButtonType.Normal)
-            .width(48)
-            .height(48)
-            .padding(0)
-            .backgroundColor('#FDECEC')
-            .borderRadius(12)
-            .onClick(() => {
-              this.deleteEditingAgentRule();
-            })
-        }
-
         Blank()
           .layoutWeight(1)
 
@@ -517,7 +550,8 @@ export struct RulesPage {
     .backgroundColor(CARD_BACKGROUND)
     .borderRadius(CARD_RADIUS)
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
-    .margin({ bottom: 18 })
+    .margin({ bottom: AGENT_RULE_CARD_GAP })
+    .clip(false)
     .zIndex(this.agentRuleDropdown === AGENT_RULE_DROPDOWN_NONE ? 1 : 120)
     .animation({ duration: 240, curve: Curve.EaseInOut })
   }
@@ -548,6 +582,7 @@ export struct RulesPage {
         })
       }
       .layoutWeight(1)
+      .clip(false)
 
       Blank()
         .width(12)
@@ -575,9 +610,11 @@ export struct RulesPage {
         })
       }
       .layoutWeight(1)
+      .clip(false)
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
+    .clip(false)
     .zIndex(80)
   }
 
@@ -626,29 +663,7 @@ export struct RulesPage {
         .color(DIVIDER_COLOR)
         .margin({ top: 22, bottom: 20 })
 
-      FloatingSelect({
-        value: this.dohProvider,
-        selectedValue: this.dohProvider,
-        expanded: this.dohDropdownExpanded,
-        options: this.dohProviderOptions(),
-        menuWidth: 150,
-        menuAlign: 'right',
-        menuTop: 52,
-        optionHeight: 52,
-        maxVisibleOptions: 4,
-        showCheck: true,
-        highlightSelected: false,
-        valueFontSize: 14,
-        valueColor: '#7B7F86',
-        showFieldDivider: true,
-        onToggle: () => {
-          this.toggleDohDropdown();
-        },
-        onSelect: (value: string) => {
-          this.selectDohProvider(value);
-        }
-      })
-      .zIndex(90)
+      this.buildDohProviderEditor();
     }
     .width('100%')
     .padding({ left: 22, right: 22, top: 24, bottom: 24 })
@@ -657,6 +672,109 @@ export struct RulesPage {
     .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
     .margin({ bottom: 18 })
     .zIndex(this.dohDropdownExpanded ? 110 : 1)
+  }
+
+  @Builder
+  private buildDohProviderEditor() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Row() {
+        Text(DOH_PREFIX)
+          .fontSize(14)
+          .fontColor('#7B7F86')
+          .maxLines(1)
+        TextInput({
+          text: this.dohEditableValue(),
+          placeholder: 'dns.alidns.com'
+        })
+          .layoutWeight(1)
+          .height(44)
+          .fontSize(14)
+          .fontColor(TEXT_PRIMARY)
+          .backgroundColor('#00000000')
+          .padding({ left: 0, right: 0 })
+          .borderWidth(0)
+          .onChange((value: string) => {
+            this.changeDohProviderInput(value);
+          })
+        Text(DOH_SUFFIX)
+          .fontSize(14)
+          .fontColor('#7B7F86')
+          .maxLines(1)
+        Divider()
+          .vertical(true)
+          .height(26)
+          .strokeWidth(1)
+          .color('#E4E7EC')
+          .margin({ left: 10, right: 10 })
+        Image($r('app.media.ic_chevron_down_gray'))
+          .width(22)
+          .height(22)
+          .rotate({ angle: this.dohDropdownExpanded ? 180 : 0 })
+          .onClick(() => {
+            this.toggleDohDropdown();
+          })
+      }
+      .width('100%')
+      .height(52)
+      .padding({ left: 14, right: 12 })
+      .alignItems(VerticalAlign.Center)
+      .border({ width: 1, color: this.dohDropdownExpanded ? PRIMARY_BLUE : '#E4E7EC', radius: 10 })
+      .backgroundColor(this.dohDropdownExpanded ? '#F8FBFF' : CARD_BACKGROUND)
+
+      if (this.dohDropdownExpanded) {
+        Row() {
+          Blank()
+            .layoutWeight(1)
+          this.buildDohProviderMenu();
+        }
+        .width('100%')
+        .height(208)
+        .position({ x: 0, y: 52 })
+        .zIndex(100)
+      }
+    }
+    .width('100%')
+    .height(52)
+    .clip(false)
+    .zIndex(90)
+  }
+
+  @Builder
+  private buildDohProviderMenu() {
+    Scroll() {
+      Column() {
+        ForEach(this.dohProviderOptions(), (option: FloatingSelectOption) => {
+          Row() {
+            Text(option.label)
+              .fontSize(17)
+              .fontColor(TEXT_PRIMARY)
+              .maxLines(1)
+              .layoutWeight(1)
+            if (this.dohEditableValue() === option.value) {
+              Image($r('app.media.ic_check_blue'))
+                .width(20)
+                .height(20)
+                .margin({ left: 12 })
+            }
+          }
+          .width('100%')
+          .height(52)
+          .padding({ left: 18, right: 18 })
+          .alignItems(VerticalAlign.Center)
+          .backgroundColor(CARD_BACKGROUND)
+          .onClick(() => {
+            this.selectDohProvider(this.buildDohProviderFromEditable(option.value));
+          })
+        }, (option: FloatingSelectOption) => option.value)
+      }
+      .width('100%')
+    }
+    .width(180)
+    .height(208)
+    .scrollBar(BarState.Off)
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(2)
+    .shadow({ radius: 18, color: '#2A000000', offsetX: 0, offsetY: 8 })
   }
 
   @Builder
@@ -856,6 +974,37 @@ export struct RulesPage {
     this.onSelectDohProvider(provider);
   }
 
+  private changeDohProviderInput(value: string): void {
+    this.onSelectDohProvider(this.buildDohProviderFromEditable(value));
+  }
+
+  private dohEditableValue(): string {
+    let provider = this.dohProvider.trim();
+    if (provider.indexOf(DOH_PREFIX) === 0) {
+      provider = provider.substring(DOH_PREFIX.length);
+    }
+    if (provider.length >= DOH_SUFFIX.length &&
+      provider.substring(provider.length - DOH_SUFFIX.length) === DOH_SUFFIX) {
+      provider = provider.substring(0, provider.length - DOH_SUFFIX.length);
+    }
+    return provider;
+  }
+
+  private buildDohProviderFromEditable(value: string): string {
+    let normalized = value.trim();
+    if (normalized.indexOf(DOH_PREFIX) === 0) {
+      normalized = normalized.substring(DOH_PREFIX.length);
+    }
+    if (normalized.length >= DOH_SUFFIX.length &&
+      normalized.substring(normalized.length - DOH_SUFFIX.length) === DOH_SUFFIX) {
+      normalized = normalized.substring(0, normalized.length - DOH_SUFFIX.length);
+    }
+    if (normalized.length === 0) {
+      return DOH_PROVIDER_ALIYUN;
+    }
+    return DOH_PREFIX + normalized + DOH_SUFFIX;
+  }
+
   private fillDraftRuleMatchHint(): void {
     if (this.draftAgentRuleType === 'wifiGateway') {
       this.draftAgentRuleMatchValue = '192.168.0.1';
@@ -866,23 +1015,112 @@ export struct RulesPage {
   }
 
   private startAgentRuleDrag(ruleId: string): void {
+    const nextSequence = this.agentRuleDragSequence + 1;
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent drag start seq=%{public}d ruleId=%{public}s edit=%{public}s rules=%{public}s dragOrderBefore=%{public}s suppress=%{public}s token=%{public}d',
+      nextSequence,
+      ruleId,
+      this.editingAgentRuleId,
+      this.agentRuleOrderForLog(this.currentAgentRuleIds()),
+      this.agentRuleOrderForLog(this.dragAgentRuleOrderIds),
+      String(this.suppressAgentRuleCardClick),
+      this.suppressAgentRuleCardClickToken
+    );
     this.resetAgentRuleEditState();
     this.draggingAgentRuleId = ruleId;
     this.dragHoverAgentRuleId = '';
     this.dragAgentRuleOrderIds = this.currentAgentRuleIds();
+    this.agentRuleDragSequence = nextSequence;
+    this.agentRuleDragStartIndex = this.agentRuleIndex(ruleId);
+    this.agentRuleDragLastTargetIndex = this.agentRuleDragStartIndex;
+    this.suppressAgentRuleCardClickToken++;
     this.suppressAgentRuleCardClick = true;
+    this.agentRuleDropCommitted = false;
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent drag start state seq=%{public}d ruleId=%{public}s startIndex=%{public}d dragOrder=%{public}s token=%{public}d',
+      this.agentRuleDragSequence,
+      ruleId,
+      this.agentRuleDragStartIndex,
+      this.agentRuleOrderForLog(this.dragAgentRuleOrderIds),
+      this.suppressAgentRuleCardClickToken
+    );
+  }
+
+  private updateAgentRulePanDrag(ruleId: string, offsetY: number): void {
+    if (this.draggingAgentRuleId !== ruleId || this.agentRuleDragStartIndex < 0) {
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent pan update skip seq=%{public}d ruleId=%{public}s dragging=%{public}s startIndex=%{public}d offsetY=%{public}s',
+        this.agentRuleDragSequence,
+        ruleId,
+        this.draggingAgentRuleId,
+        this.agentRuleDragStartIndex,
+        String(offsetY)
+      );
+      return;
+    }
+
+    const targetIndex = this.clampAgentRuleIndex(
+      Math.round(this.agentRuleDragStartIndex + offsetY / AGENT_RULE_DRAG_ROW_HEIGHT)
+    );
+    if (targetIndex === this.agentRuleDragLastTargetIndex) {
+      return;
+    }
+
+    const orderIds = this.activeDragAgentRuleOrderIds();
+    const targetRuleId = targetIndex >= 0 && targetIndex < orderIds.length ? orderIds[targetIndex] : '';
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent pan update seq=%{public}d ruleId=%{public}s offsetY=%{public}s startIndex=%{public}d targetIndex=%{public}d target=%{public}s order=%{public}s',
+      this.agentRuleDragSequence,
+      ruleId,
+      String(offsetY),
+      this.agentRuleDragStartIndex,
+      targetIndex,
+      targetRuleId,
+      this.agentRuleOrderForLog(orderIds)
+    );
+    this.agentRuleDragLastTargetIndex = targetIndex;
+    if (targetRuleId.length > 0) {
+      this.previewAgentRuleDrop(targetRuleId);
+    }
   }
 
   private previewAgentRuleDrop(targetRuleId: string): void {
-    if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === targetRuleId ||
-      this.dragHoverAgentRuleId === targetRuleId) {
+    if (this.draggingAgentRuleId.length === 0 || this.draggingAgentRuleId === targetRuleId) {
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent drag preview skip target=%{public}s dragging=%{public}s reason=%{public}s',
+        targetRuleId,
+        this.draggingAgentRuleId,
+        this.draggingAgentRuleId.length === 0 ? 'empty-dragging' : 'same-rule'
+      );
       return;
     }
 
     const orderIds = this.activeDragAgentRuleOrderIds();
     const fromIndex = this.agentRuleIdIndexIn(this.draggingAgentRuleId, orderIds);
     const toIndex = this.agentRuleIdIndexIn(targetRuleId, orderIds);
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent drag preview target=%{public}s dragging=%{public}s from=%{public}d to=%{public}d activeOrder=%{public}s',
+      targetRuleId,
+      this.draggingAgentRuleId,
+      fromIndex,
+      toIndex,
+      this.agentRuleOrderForLog(orderIds)
+    );
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+      hilog.info(DOMAIN, TAG, 'agent drag preview no-op target=%{public}s from=%{public}d to=%{public}d',
+        targetRuleId, fromIndex, toIndex);
       return;
     }
 
@@ -912,34 +1150,82 @@ export struct RulesPage {
       this.dragHoverAgentRuleId = targetRuleId;
       this.dragAgentRuleOrderIds = nextOrderIds;
     });
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent drag preview applied target=%{public}s nextOrder=%{public}s',
+      targetRuleId,
+      this.agentRuleOrderForLog(nextOrderIds)
+    );
   }
 
   private commitAgentRuleDrop(): void {
-    if (this.draggingAgentRuleId.length === 0) {
-      this.endAgentRuleDrag();
-      return;
-    }
-
-    const originalIndex = this.agentRuleIndex(this.draggingAgentRuleId);
-    const targetIndex = this.agentRuleIdIndexIn(this.draggingAgentRuleId, this.activeDragAgentRuleOrderIds());
-    if (originalIndex >= 0 && targetIndex >= 0 && originalIndex !== targetIndex) {
-      this.onReorderAgentRule(this.draggingAgentRuleId, targetIndex);
-    }
-
+    hilog.info(DOMAIN, TAG, 'agent drag commit requested dragging=%{public}s committed=%{public}s dragOrder=%{public}s',
+      this.draggingAgentRuleId, String(this.agentRuleDropCommitted), this.agentRuleOrderForLog(this.dragAgentRuleOrderIds));
     this.endAgentRuleDrag();
   }
 
   private endAgentRuleDrag(): void {
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent drag end begin dragging=%{public}s committed=%{public}s rules=%{public}s dragOrder=%{public}s',
+      this.draggingAgentRuleId,
+      String(this.agentRuleDropCommitted),
+      this.agentRuleOrderForLog(this.currentAgentRuleIds()),
+      this.agentRuleOrderForLog(this.dragAgentRuleOrderIds)
+    );
+    if (!this.agentRuleDropCommitted && this.draggingAgentRuleId.length > 0) {
+      const originalIndex = this.agentRuleIndex(this.draggingAgentRuleId);
+      const targetIndex = this.agentRuleIdIndexIn(this.draggingAgentRuleId, this.activeDragAgentRuleOrderIds());
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent drag end computed original=%{public}d target=%{public}d dragging=%{public}s',
+        originalIndex,
+        targetIndex,
+        this.draggingAgentRuleId
+      );
+      if (originalIndex >= 0 && targetIndex >= 0 && originalIndex !== targetIndex) {
+        hilog.info(DOMAIN, TAG, 'agent drag reorder emit ruleId=%{public}s target=%{public}d',
+          this.draggingAgentRuleId, targetIndex);
+        this.onReorderAgentRule(this.draggingAgentRuleId, targetIndex);
+      } else {
+        hilog.info(DOMAIN, TAG, 'agent drag reorder skipped original=%{public}d target=%{public}d',
+          originalIndex, targetIndex);
+      }
+      this.agentRuleDropCommitted = true;
+    }
     this.draggingAgentRuleId = '';
     this.dragHoverAgentRuleId = '';
     this.dragAgentRuleOrderIds = [];
+    this.agentRuleDragStartIndex = -1;
+    this.agentRuleDragLastTargetIndex = -1;
+    const token = ++this.suppressAgentRuleCardClickToken;
     this.suppressAgentRuleCardClick = true;
+    hilog.info(DOMAIN, TAG, 'agent drag end cleared token=%{public}d', token);
     setTimeout(() => {
-      this.suppressAgentRuleCardClick = false;
+      if (token === this.suppressAgentRuleCardClickToken) {
+        this.suppressAgentRuleCardClick = false;
+        hilog.info(DOMAIN, TAG, 'agent drag click suppression released token=%{public}d', token);
+      } else {
+        hilog.info(DOMAIN, TAG, 'agent drag click suppression release ignored token=%{public}d current=%{public}d',
+          token, this.suppressAgentRuleCardClickToken);
+      }
     }, 120);
   }
 
   private resetAgentRuleEditState(): void {
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent reset edit state edit=%{public}s dragging=%{public}s dragOrder=%{public}s suppress=%{public}s token=%{public}d',
+      this.editingAgentRuleId,
+      this.draggingAgentRuleId,
+      this.agentRuleOrderForLog(this.dragAgentRuleOrderIds),
+      String(this.suppressAgentRuleCardClick),
+      this.suppressAgentRuleCardClickToken
+    );
     this.editingAgentRuleId = '';
     this.draftAgentRuleType = 'wifiGateway';
     this.draftAgentRuleMatchValue = '';
@@ -952,7 +1238,11 @@ export struct RulesPage {
     this.draggingAgentRuleId = '';
     this.dragHoverAgentRuleId = '';
     this.dragAgentRuleOrderIds = [];
+    this.agentRuleDragStartIndex = -1;
+    this.agentRuleDragLastTargetIndex = -1;
     this.suppressAgentRuleCardClick = false;
+    this.suppressAgentRuleCardClickToken++;
+    this.agentRuleDropCommitted = false;
   }
 
   private agentRuleIndex(ruleId: string): number {
@@ -1020,6 +1310,35 @@ export struct RulesPage {
       }
     }
     return -1;
+  }
+
+  private clampAgentRuleIndex(index: number): number {
+    if (this.agentRules.length === 0) {
+      return -1;
+    }
+    if (index < 0) {
+      return 0;
+    }
+    if (index >= this.agentRules.length) {
+      return this.agentRules.length - 1;
+    }
+    return index;
+  }
+
+  private agentRuleOrderForLog(ruleIds: string[]): string {
+    if (ruleIds.length === 0) {
+      return '<empty>';
+    }
+    let result = '';
+    for (let index = 0; index < ruleIds.length; index++) {
+      const ruleId = ruleIds[index];
+      const tail = ruleId.length > 6 ? ruleId.substring(ruleId.length - 6) : ruleId;
+      if (index > 0) {
+        result += '>';
+      }
+      result += tail;
+    }
+    return result;
   }
 
   private isRuleSwitchOn(switchKey: string): boolean {
@@ -1102,19 +1421,31 @@ export struct RulesPage {
 
   private dohProviderOptions(): FloatingSelectOption[] {
     const options: FloatingSelectOption[] = [{
-      value: DOH_PROVIDER_ALIYUN,
+      value: this.dohEditableValueForProvider(DOH_PROVIDER_ALIYUN),
       label: 'Aliyun'
     }, {
-      value: DOH_PROVIDER_GOOGLE,
+      value: this.dohEditableValueForProvider(DOH_PROVIDER_GOOGLE),
       label: 'Google'
     }, {
-      value: DOH_PROVIDER_CLOUDFLARE,
+      value: this.dohEditableValueForProvider(DOH_PROVIDER_CLOUDFLARE),
       label: 'Cloudflare'
     }, {
-      value: DOH_PROVIDER_TENCENT,
+      value: this.dohEditableValueForProvider(DOH_PROVIDER_TENCENT),
       label: 'Tencent'
     }];
     return options;
+  }
+
+  private dohEditableValueForProvider(provider: string): string {
+    let value = provider;
+    if (value.indexOf(DOH_PREFIX) === 0) {
+      value = value.substring(DOH_PREFIX.length);
+    }
+    if (value.length >= DOH_SUFFIX.length &&
+      value.substring(value.length - DOH_SUFFIX.length) === DOH_SUFFIX) {
+      value = value.substring(0, value.length - DOH_SUFFIX.length);
+    }
+    return value;
   }
 
   private agentRuleTypeFromValue(value: string): AgentRuleType {

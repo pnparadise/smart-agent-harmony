@@ -42,13 +42,14 @@ export struct FloatingSelect {
           }
         }
         .width('100%')
-        .offset({ x: 0, y: this.menuTop })
+        .height(this.menuHeight())
+        .position({ x: 0, y: this.menuTop })
         .zIndex(100)
       }
     }
     .width('100%')
-    .height(this.selectStackHeight())
-    .margin({ bottom: this.selectStackBottomMargin() })
+    .height(this.fieldStackHeight())
+    .clip(false)
   }
 
   @Builder
@@ -154,20 +155,6 @@ export struct FloatingSelect {
       return 64;
     }
     return 52;
-  }
-
-  private selectStackHeight(): number {
-    if (this.expanded) {
-      return this.menuTop + this.menuHeight();
-    }
-    return this.fieldStackHeight();
-  }
-
-  private selectStackBottomMargin(): number {
-    if (this.expanded) {
-      return this.fieldStackHeight() - this.selectStackHeight();
-    }
-    return 0;
   }
 
   private menuHeight(): number {

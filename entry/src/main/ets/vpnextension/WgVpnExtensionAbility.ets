@@ -30,7 +30,7 @@ const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
 const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
-const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 1000;
+const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 30000;
 const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
 const WANT_ACTION_RESTORE = 'restore';
 
@@ -217,7 +217,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
       this.startDataTransferNotificationUpdates();
-      this.publishRuntimeStatus(true, false).catch((err: BusinessError) => {
+      this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
     } catch (err) {
@@ -499,11 +499,13 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG, 'cleanup end');
   }
 
+  private resetDataTransferNotificationState(): void {
+    this.lastNotifiedTxBytes = -1;
+    this.lastNotifiedRxBytes = -1;
+  }
+
   private startDataTransferNotificationUpdates(): void {
     this.stopDataTransferNotificationUpdates();
-    this.updateDataTransferNotification().catch((err: BusinessError) => {
-      hilog.warn(DOMAIN, TAG, 'initial dataTransfer notification update failed: %{public}s', this.formatError(err));
-    });
     this.dataTransferNotificationTimer = setInterval(() => {
       this.updateDataTransferNotification().catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'dataTransfer notification update failed: %{public}s', this.formatError(err));
@@ -516,8 +518,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       clearInterval(this.dataTransferNotificationTimer);
       this.dataTransferNotificationTimer = -1;
     }
-    this.lastNotifiedTxBytes = -1;
-    this.lastNotifiedRxBytes = -1;
+    this.resetDataTransferNotificationState();
   }
 
   private async updateDataTransferNotification(): Promise<void> {
