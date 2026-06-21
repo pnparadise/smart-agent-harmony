@@ -52,7 +52,7 @@ export struct WebBrowserHost {
     const homeUrl = this.normalizeHomeInitialUrl(this.initialUrl);
     this.instances = [this.createHomeInstance(homeUrl)];
     this.activeInstanceId = WEB_HOME_INSTANCE_ID;
-    this.bookmarkHomeVisible = this.isBookmarkHomeUrl(this.initialUrl);
+    this.bookmarkHomeVisible = this.shouldShowLaunchBookmarkHome(this.initialUrl);
     this.openLaunchInstanceIfNeeded(homeUrl);
     this.loadTabStates();
     this.loadBookmarks();
@@ -76,7 +76,7 @@ export struct WebBrowserHost {
           allowBookmarkHome: instance.id === WEB_HOME_INSTANCE_ID,
           showAddressBar: instance.id === WEB_HOME_INSTANCE_ID,
           bookmarkHomeVisibleFromHost: this.bookmarkHomeVisible && instance.id === WEB_HOME_INSTANCE_ID,
-          homeTabBackCountFromHost: this.tabBackCount(WEB_BOOKMARKS_HOME_TAB_ID),
+          homeTabBackCountFromHost: this.tabBackCount(WEB_HOME_INSTANCE_ID),
           tabBackCountFromHost: (bookmarkId: string): number => this.tabBackCount(bookmarkId),
           onClose: () => {
             this.onClose();
@@ -125,10 +125,6 @@ export struct WebBrowserHost {
   }
 
   private handleBackNavigation(): boolean {
-    if (this.bookmarkHomeVisible) {
-      this.bookmarkHomeVisible = false;
-      return true;
-    }
     const handler = this.activeBackHandler();
     if (handler !== undefined) {
       return handler();
@@ -232,7 +228,13 @@ export struct WebBrowserHost {
     }
     if (id === WEB_HOME_INSTANCE_ID) {
       if (this.isBookmarkHomeUrl(this.initialUrl)) {
-        this.openBookmarkHome();
+        if (this.shouldShowLaunchBookmarkHome(this.initialUrl)) {
+          this.openBookmarkHome();
+          return;
+        }
+        this.openHomeInstance();
+        this.updateHomeInitialUrl(this.normalizeHomeInitialUrl(this.initialUrl));
+        this.loadTabStates();
         return;
       }
       this.openHomeInstance();
@@ -261,9 +263,29 @@ export struct WebBrowserHost {
 
   private normalizeHomeInitialUrl(initialUrl: string): string {
     if (this.isBookmarkHomeUrl(initialUrl)) {
+      const restoredUrl = this.restoredHomeUrl();
+      if (restoredUrl.length > 0) {
+        return restoredUrl;
+      }
       return WEB_BOOKMARKS_HOME_URL;
     }
     return this.normalizeUrl(initialUrl);
+  }
+
+  private shouldShowLaunchBookmarkHome(initialUrl: string): boolean {
+    return this.isBookmarkHomeUrl(initialUrl) && !this.hasRestorableHomeStack();
+  }
+
+  private hasRestorableHomeStack(): boolean {
+    return this.restoredHomeUrl().length > 0;
+  }
+
+  private restoredHomeUrl(): string {
+    const state = this.webStateStore().readTabStateMeta(WEB_HOME_INSTANCE_ID, '');
+    if (state.url.length > 0 && !this.isBookmarkHomeUrl(state.url)) {
+      return this.normalizeUrl(state.url);
+    }
+    return '';
   }
 
   private updateHomeInitialUrl(url: string): void {

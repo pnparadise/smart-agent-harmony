@@ -2,8 +2,9 @@ import { PullRefreshState } from './WebBrowserTypes';
 
 const TOUCH_REFRESH_DISTANCE = 112;
 const PULL_REFRESH_START_THRESHOLD = 24;
-const PULL_REFRESH_MAX_DISTANCE = 152;
+const PULL_REFRESH_MAX_DISTANCE = 128;
 const PULL_REFRESH_INDICATOR_SIZE = 42;
+const PULL_REFRESH_REFRESHING_OFFSET = 32;
 const PULL_REFRESH_READY_PROGRESS = 100;
 
 export class WebPullRefresh {
@@ -25,12 +26,17 @@ export class WebPullRefresh {
       browserRefreshEnabled: true,
       probeSerial: 0,
       gestureLastOffsetY: 0,
-      gesturePullStartOffsetY: 0
+      gesturePullStartOffsetY: 0,
+      gestureOverScrollActive: false
     };
   }
 
   static shouldShowIndicator(pullRefresh: PullRefreshState): boolean {
     return pullRefresh.visible || pullRefresh.refreshing || pullRefresh.settling;
+  }
+
+  static isRefreshing(pullRefresh: PullRefreshState): boolean {
+    return pullRefresh.refreshing;
   }
 
   static activeRotation(pullRefresh: PullRefreshState): number {
@@ -39,9 +45,13 @@ export class WebPullRefresh {
 
   static indicatorOffset(pullRefresh: PullRefreshState): number {
     if (pullRefresh.refreshing) {
-      return 12;
+      return PULL_REFRESH_REFRESHING_OFFSET;
     }
     return Math.max(-PULL_REFRESH_INDICATOR_SIZE, pullRefresh.distance - PULL_REFRESH_INDICATOR_SIZE);
+  }
+
+  static distance(pullRefresh: PullRefreshState): number {
+    return pullRefresh.distance;
   }
 
   static update(pullRefresh: PullRefreshState, deltaFromStart: number): void {
@@ -61,6 +71,7 @@ export class WebPullRefresh {
     pullRefresh.rotation = 0;
     pullRefresh.gestureLastOffsetY = 0;
     pullRefresh.gesturePullStartOffsetY = 0;
+    pullRefresh.gestureOverScrollActive = false;
   }
 
   static cancel(pullRefresh: PullRefreshState, onChanged: () => void): void {
@@ -94,6 +105,7 @@ export class WebPullRefresh {
     pullRefresh.tracking = true;
     pullRefresh.gestureLastOffsetY = pullStartOffsetY;
     pullRefresh.gesturePullStartOffsetY = pullStartOffsetY;
+    pullRefresh.gestureOverScrollActive = true;
   }
 
   static markRefreshing(pullRefresh: PullRefreshState): void {

@@ -15,7 +15,6 @@ const SHORTCUT_FOREGROUND_ICON = 'foreground_v3.png';
 const SHORTCUT_ICON_SIZE = 256;
 const SHORTCUT_DEFAULT_ICON_COLOR = 0xFF2F7CF6;
 const SHORTCUT_ICON_MAX_BYTES = 2 * 1024 * 1024;
-const SHORTCUT_ICON_HTML_HEAD_MAX_BYTES = 256 * 1024;
 const SHORTCUT_ICON_HTTP_TIMEOUT_MS = 8000;
 const SHORTCUT_ICON_CANDIDATE_LOG_LIMIT = 40;
 const SHORTCUT_ICON_MIN_WEB_SIZE = 96;
@@ -90,8 +89,6 @@ interface UrlParts {
 interface HttpHeaders {
   Accept: string;
   'User-Agent': string;
-  Range?: string;
-  'Accept-Encoding'?: string;
 }
 
 export class WebShortcutIconService {
@@ -113,17 +110,28 @@ export class WebShortcutIconService {
       const iconDir = this.shortcutIconDir(url);
       this.ensureDirectory(iconDir);
       const foregroundIcon = iconDir + '/' + SHORTCUT_FOREGROUND_ICON;
-      if (preferWebIcon && await this.writeBestWebIcon(url, foregroundIcon, userAgent, pageIconInfoLoader)) {
-        return { foregroundIcon: foregroundIcon };
+
+      // 1. 如果优先使用网络图标，尝试在线寻找并下载（PWA Manifest 大图 -> 网页小图）
+      if (preferWebIcon) {
+        const success = await this.writeBestWebIcon(url, foregroundIcon, userAgent, pageIconInfoLoader);
+        if (success) {
+          return { foregroundIcon: foregroundIcon };
+        }
       }
+
+      // 2. 如果不优先使用网络图标，且本地已经有缓存，直接返回已有的
       if (!preferWebIcon && this.fileExists(foregroundIcon)) {
         return { foregroundIcon: foregroundIcon };
       }
-      if (!preferWebIcon && favicon !== undefined && faviconUrl === url) {
+
+      // 3. 顺位降级：若网络下载失败或不优先使用网络，直接采用 favor (favicon PixelMap)
+      if (favicon !== undefined) {
         await this.writePixelMapToPng(favicon, foregroundIcon);
-      } else {
-        await this.ensureDefaultShortcutIcon(foregroundIcon);
+        return { foregroundIcon: foregroundIcon };
       }
+
+      // 4. 终极兜底：系统默认纯色图
+      await this.ensureDefaultShortcutIcon(foregroundIcon);
       return { foregroundIcon: foregroundIcon };
     } catch (err) {
       const error = err as BusinessError;
@@ -308,84 +316,17 @@ export class WebShortcutIconService {
     for (let index = 0; index < pageIconInfo.icons.length; index++) {
       this.addIconCandidate(result, pageIconInfo.icons[index]);
     }
-    await this.addHtmlIconCandidates(result, url, userAgent);
+
     result.sort((left: ShortcutIconCandidate, right: ShortcutIconCandidate) => {
-      const sizeScore = this.iconSizeScore(right.size) - this.iconSizeScore(left.size);
-      if (sizeScore !== 0) {
-        return sizeScore;
+      // 按照优先级梯队进行大方向排序
+      const scoreDiff = this.candidatePriorityScore(right) - this.candidatePriorityScore(left);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
       }
-      const sourceScore = this.iconSourceScore(right.source) - this.iconSourceScore(left.source);
-      if (sourceScore !== 0) {
-        return sourceScore;
-      }
+      // 同一档优先级内部，按图标尺寸降序（大图排在前面）
       return right.size - left.size;
     });
     return result;
-  }
-
-  private async addHtmlIconCandidates(
-    result: ShortcutIconCandidate[],
-    url: string,
-    userAgent: string
-  ): Promise<void> {
-    try {
-      const html = await this.fetchHtmlHead(url, userAgent);
-      if (html.length === 0) {
-        return;
-      }
-      const added = this.collectHtmlIconCandidates(result, url, html);
-      hilog.info(DOMAIN, TAG, 'html icon parse added=%{public}d url=%{public}s', added, url);
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'load page html icons failed: %{public}s', error.message ?? JSON.stringify(err));
-    }
-  }
-
-  private collectHtmlIconCandidates(result: ShortcutIconCandidate[], pageUrl: string, html: string): number {
-    let searchStart = 0;
-    let added = 0;
-    while (searchStart < html.length) {
-      const linkStart = WebShortcutIconService.indexOfIgnoreCase(html, '<link', searchStart);
-      if (linkStart < 0) {
-        return added;
-      }
-      const linkEnd = html.indexOf('>', linkStart + 5);
-      if (linkEnd < 0) {
-        return added;
-      }
-      const tag = html.substring(linkStart, linkEnd + 1);
-      if (this.addHtmlLinkIconCandidate(result, pageUrl, tag)) {
-        added++;
-      }
-      searchStart = linkEnd + 1;
-    }
-    return added;
-  }
-
-  private addHtmlLinkIconCandidate(result: ShortcutIconCandidate[], pageUrl: string, tag: string): boolean {
-    const rel = WebShortcutIconService.htmlAttributeValue(tag, 'rel').toLowerCase();
-    if (rel.length === 0) {
-      return false;
-    }
-    const isAppleTouchIcon = rel.indexOf('apple-touch-icon') >= 0;
-    const isIcon = WebShortcutIconService.hasRelToken(rel, 'icon') || rel.indexOf('shortcut icon') >= 0;
-    if (!isAppleTouchIcon && !isIcon) {
-      return false;
-    }
-    const href = WebShortcutIconService.htmlAttributeValue(tag, 'href');
-    const resolved = WebShortcutIconService.resolveUrl(pageUrl, href);
-    if (resolved.length === 0) {
-      return false;
-    }
-    const sizes = WebShortcutIconService.htmlAttributeValue(tag, 'sizes');
-    const type = WebShortcutIconService.htmlAttributeValue(tag, 'type');
-    this.addIconCandidate(result, {
-      url: resolved,
-      size: WebShortcutIconService.iconCandidateSize(resolved, sizes, type),
-      source: isAppleTouchIcon ? 'apple-touch-icon' : 'link-icon'
-    });
-    hilog.info(DOMAIN, TAG, 'html icon tag rel=%{public}s size=%{public}s href=%{public}s', rel, sizes, resolved);
-    return true;
   }
 
   private async loadWebManifest(manifestUrl: string, userAgent: string): Promise<WebManifest> {
@@ -482,60 +423,19 @@ export class WebShortcutIconService {
     return normalizedScope.length > 0 && normalizedUrl.startsWith(normalizedScope);
   }
 
-  private async fetchHtmlHead(url: string, userAgent: string): Promise<string> {
-    try {
-      const data = await this.fetchArrayBuffer(
-        url,
-        true,
-        userAgent,
-        'bytes=0-' + String(SHORTCUT_ICON_HTML_HEAD_MAX_BYTES - 1),
-        SHORTCUT_ICON_HTML_HEAD_MAX_BYTES,
-        'text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8'
-      );
-      return WebShortcutIconService.htmlHeadOnly(buffer.from(new Uint8Array(data)).toString('utf8'));
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'load page html head range failed: %{public}s', error.message ?? JSON.stringify(err));
-    }
-
-    const data = await this.fetchArrayBuffer(
-      url,
-      true,
-      userAgent,
-      '',
-      SHORTCUT_ICON_MAX_BYTES,
-      'text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8'
-    );
-    if (data.byteLength <= 0 || data.byteLength > SHORTCUT_ICON_MAX_BYTES) {
-      return '';
-    }
-    return WebShortcutIconService.htmlHeadOnly(buffer.from(new Uint8Array(data)).toString('utf8'));
-  }
-
   private async fetchArrayBuffer(
     url: string,
     textLike: boolean,
-    userAgent: string,
-    rangeHeader: string = '',
-    maxLimit: number = SHORTCUT_ICON_MAX_BYTES,
-    acceptOverride: string = ''
+    userAgent: string
   ): Promise<ArrayBuffer> {
     const request = http.createHttp();
-    const accept = acceptOverride.length > 0 ? acceptOverride : (textLike ?
+    const accept = textLike ?
       'application/manifest+json, application/json, text/plain, */*' :
-      'image/avif, image/webp, image/png, image/jpeg, image/svg+xml, image/*, */*');
-    let headers: HttpHeaders = {
+      'image/avif, image/webp, image/png, image/jpeg, image/svg+xml, image/*, */*';
+    const headers: HttpHeaders = {
       Accept: accept,
       'User-Agent': userAgent
     };
-    if (rangeHeader.length > 0) {
-      headers = {
-        Accept: accept,
-        'User-Agent': userAgent,
-        Range: rangeHeader,
-        'Accept-Encoding': 'identity'
-      };
-    }
     try {
       const options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
@@ -543,7 +443,7 @@ export class WebShortcutIconService {
         usingCache: true,
         readTimeout: SHORTCUT_ICON_HTTP_TIMEOUT_MS,
         connectTimeout: SHORTCUT_ICON_HTTP_TIMEOUT_MS,
-        maxLimit: maxLimit,
+        maxLimit: SHORTCUT_ICON_MAX_BYTES,
         header: headers
       };
       const response = await request.request(url, options);
@@ -568,6 +468,9 @@ export class WebShortcutIconService {
         if (candidate.size > candidates[index].size) {
           candidates[index].size = candidate.size;
         }
+        if (this.iconSourceScore(candidate.source) > this.iconSourceScore(candidates[index].source)) {
+          candidates[index].source = candidate.source;
+        }
         return;
       }
     }
@@ -584,20 +487,20 @@ export class WebShortcutIconService {
     return 1;
   }
 
-  private iconSizeScore(size: number): number {
-    if (size >= SHORTCUT_ICON_SIZE) {
-      return 4;
+  // 优先级体系：大图（尺寸 >= 96px 或未标注尺寸 size===0）与小图（尺寸 < 96px 且 > 0）划分
+  private candidatePriorityScore(candidate: ShortcutIconCandidate): number {
+    const size = candidate.size;
+    const source = candidate.source;
+    const isLarge = size >= SHORTCUT_ICON_MIN_WEB_SIZE || size === 0;
+
+    if (source === 'manifest') {
+      return isLarge ? 4 : 2; // PWA / Manifest 大图 (4分最高)；PWA 小图 (2分)
     }
-    if (size >= 180) {
-      return 3;
+    if (source === 'apple-touch-icon') {
+      return isLarge ? 3 : 2; // apple-touch 大图 (3分)；apple-touch 小图 (2分)
     }
-    if (size >= SHORTCUT_ICON_MIN_WEB_SIZE) {
-      return 2;
-    }
-    if (size > 0) {
-      return 1;
-    }
-    return 0;
+    // 普通 link-icon 标签
+    return isLarge ? 3 : 1;   // 普通 link 大图 (3分)；普通小图 (1分最末)
   }
 
   private async ensureDefaultShortcutIcon(path: string): Promise<void> {
@@ -675,28 +578,40 @@ export class WebShortcutIconService {
       const script =
         'JSON.stringify((function(){' +
           'function abs(v){try{return v?new URL(v,document.baseURI).href:"";}catch(e){return "";}}' +
-          'function size(v){if(!v||v==="any")return 0;var m=String(v).match(/(\\d+)\\s*x\\s*(\\d+)/i);return m?Math.max(parseInt(m[1]),parseInt(m[2])):0;}' +
+          'function size(v){' +
+          'if(!v||v==="any")return 0;' +
+          'var parts=String(v).split(/\\s+/);' +
+          'var max=0;' +
+          'for(var i=0;i<parts.length;i++){' +
+          'var m=parts[i].match(/(\\d+)\\s*x\\s*(\\d+)/i);' +
+          'if(m){' +
+          'var s=Math.max(parseInt(m[1]),parseInt(m[2]));' +
+          'if(s>max)max=s;' +
+          '}' +
+          '}' +
+          'return max;' +
+          '}' +
           'function pathSize(v){var m=String(v||"").match(/(?:^|[^0-9])(\\d{2,4})\\s*x\\s*(\\d{2,4})(?:[^0-9]|$)/i);return m?Math.max(parseInt(m[1]),parseInt(m[2])):0;}' +
           'function iconSize(link,href,rel){' +
-            'var declared=size(link.getAttribute("sizes"));if(declared>0)return declared;' +
-            'var sizes=String(link.getAttribute("sizes")||"").toLowerCase();' +
-            'var type=String(link.getAttribute("type")||"").toLowerCase();' +
-            'if(sizes==="any"||type.indexOf("svg")>=0||/\\.svg(?:[?#]|$)/i.test(href))return 512;' +
-            'var named=pathSize(href);if(named>0)return named;' +
-            'if(rel.indexOf("apple-touch-icon")>=0)return 180;' +
-            'return 0;' +
+          'var declared=size(link.getAttribute("sizes"));if(declared>0)return declared;' +
+          'var sizes=String(link.getAttribute("sizes")||"").toLowerCase();' +
+          'var type=String(link.getAttribute("type")||"").toLowerCase();' +
+          'if(sizes==="any"||type.indexOf("svg")>=0||/\\.svg(?:[?#]|$)/i.test(href))return 512;' +
+          'var named=pathSize(href);if(named>0)return named;' +
+          'if(rel.indexOf("apple-touch-icon")>=0)return 180;' +
+          'return 0;' +
           '}' +
           'var manifest="";var icons=[];' +
           'var links=document.querySelectorAll("link[rel][href]");' +
           'for(var i=0;i<links.length;i++){' +
-            'var link=links[i];var rel=String(link.getAttribute("rel")||"").toLowerCase();var href=abs(link.getAttribute("href"));' +
-            'if(!href)continue;' +
-            'if(!manifest&&rel.split(/\\s+/).indexOf("manifest")>=0){manifest=href;continue;}' +
-            'if(rel.indexOf("apple-touch-icon")>=0){icons.push({url:href,size:iconSize(link,href,rel),source:"apple-touch-icon"});continue;}' +
-            'if(rel.split(/\\s+/).indexOf("icon")>=0||rel.indexOf("shortcut icon")>=0){icons.push({url:href,size:iconSize(link,href,rel),source:"link-icon"});}' +
+          'var link=links[i];var rel=String(link.getAttribute("rel")||"").toLowerCase();var href=abs(link.getAttribute("href"));' +
+          'if(!href)continue;' +
+          'if(!manifest&&rel.split(/\\s+/).indexOf("manifest")>=0){manifest=href;continue;}' +
+          'if(rel.indexOf("apple-touch-icon")>=0){icons.push({url:href,size:iconSize(link,href,rel),source:"apple-touch-icon"});continue;}' +
+          'if(rel.split(/\\s+/).indexOf("icon")>=0||rel.indexOf("shortcut icon")>=0){icons.push({url:href,size:iconSize(link,href,rel),source:"link-icon"});}' +
           '}' +
           'return {manifestUrl:manifest,icons:icons};' +
-        '})())';
+          '})())';
       const raw = await controller.runJavaScript(script);
       return WebShortcutIconService.parsePageIconInfo(raw);
     } catch (err) {
@@ -719,21 +634,21 @@ export class WebShortcutIconService {
           'function abs(v){try{return v?new URL(v,document.baseURI).href:"";}catch(e){return "";}}' +
           'var manifest="";var links=document.querySelectorAll("link[rel][href]");' +
           'for(var i=0;i<links.length;i++){' +
-            'var link=links[i];var rel=String(link.getAttribute("rel")||"").toLowerCase();' +
-            'if(rel.split(/\\s+/).indexOf("manifest")>=0){manifest=abs(link.getAttribute("href"));break;}' +
+          'var link=links[i];var rel=String(link.getAttribute("rel")||"").toLowerCase();' +
+          'if(rel.split(/\\s+/).indexOf("manifest")>=0){manifest=abs(link.getAttribute("href"));break;}' +
           '}' +
           'var result={manifestUrl:manifest,hasServiceWorker:false,serviceWorkerScope:""};' +
           'try{' +
-            'if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){' +
-              'var reg=await navigator.serviceWorker.getRegistration();' +
-              'if(reg){result.hasServiceWorker=true;result.serviceWorkerScope=String(reg.scope||"");}' +
-            '}' +
-            'if(!result.hasServiceWorker&&navigator.serviceWorker&&navigator.serviceWorker.controller){' +
-              'result.hasServiceWorker=true;' +
-            '}' +
+          'if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){' +
+          'var reg=await navigator.serviceWorker.getRegistration();' +
+          'if(reg){result.hasServiceWorker=true;result.serviceWorkerScope=String(reg.scope||"");}' +
+          '}' +
+          'if(!result.hasServiceWorker&&navigator.serviceWorker&&navigator.serviceWorker.controller){' +
+          'result.hasServiceWorker=true;' +
+          '}' +
           '}catch(e){}' +
           'return JSON.stringify(result);' +
-        '})()';
+          '})()';
       const raw = await controller.runJavaScript(script);
       return WebShortcutIconService.parsePagePwaInfo(raw);
     } catch (err) {
@@ -900,109 +815,6 @@ export class WebShortcutIconService {
 
   private static isDigit(value: string): boolean {
     return value >= '0' && value <= '9';
-  }
-
-  private static indexOfIgnoreCase(value: string, search: string, start: number): number {
-    return value.toLowerCase().indexOf(search.toLowerCase(), start);
-  }
-
-  private static htmlHeadOnly(html: string): string {
-    const headEnd = WebShortcutIconService.indexOfIgnoreCase(html, '</head>', 0);
-    if (headEnd >= 0) {
-      return html.substring(0, headEnd + 7);
-    }
-    const bodyStart = WebShortcutIconService.indexOfIgnoreCase(html, '<body', 0);
-    if (bodyStart >= 0) {
-      return html.substring(0, bodyStart);
-    }
-    return html;
-  }
-
-  private static htmlAttributeValue(tag: string, name: string): string {
-    const lowerTag = tag.toLowerCase();
-    const lowerName = name.toLowerCase();
-    let searchStart = 0;
-    while (searchStart < lowerTag.length) {
-      const index = lowerTag.indexOf(lowerName, searchStart);
-      if (index < 0) {
-        return '';
-      }
-      const before = index > 0 ? lowerTag.charAt(index - 1) : ' ';
-      const afterIndex = index + lowerName.length;
-      const after = afterIndex < lowerTag.length ? lowerTag.charAt(afterIndex) : '';
-      if (!WebShortcutIconService.isAttributeNameChar(before) &&
-        !WebShortcutIconService.isAttributeNameChar(after)) {
-        let cursor = afterIndex;
-        while (cursor < tag.length && WebShortcutIconService.isWhitespace(tag.charAt(cursor))) {
-          cursor++;
-        }
-        if (cursor < tag.length && tag.charAt(cursor) === '=') {
-          return WebShortcutIconService.readHtmlAttributeValue(tag, cursor + 1);
-        }
-      }
-      searchStart = afterIndex;
-    }
-    return '';
-  }
-
-  private static hasRelToken(rel: string, token: string): boolean {
-    const normalizedRel = rel.toLowerCase();
-    const normalizedToken = token.toLowerCase();
-    let start = 0;
-    while (start < normalizedRel.length) {
-      while (start < normalizedRel.length && WebShortcutIconService.isWhitespace(normalizedRel.charAt(start))) {
-        start++;
-      }
-      let end = start;
-      while (end < normalizedRel.length && !WebShortcutIconService.isWhitespace(normalizedRel.charAt(end))) {
-        end++;
-      }
-      if (end > start && normalizedRel.substring(start, end) === normalizedToken) {
-        return true;
-      }
-      start = end + 1;
-    }
-    return false;
-  }
-
-  private static readHtmlAttributeValue(tag: string, start: number): string {
-    let cursor = start;
-    while (cursor < tag.length && WebShortcutIconService.isWhitespace(tag.charAt(cursor))) {
-      cursor++;
-    }
-    if (cursor >= tag.length) {
-      return '';
-    }
-    const quote = tag.charAt(cursor);
-    if (quote === '"' || quote === '\'') {
-      const end = tag.indexOf(quote, cursor + 1);
-      if (end < 0) {
-        return '';
-      }
-      return WebShortcutIconService.htmlDecode(tag.substring(cursor + 1, end));
-    }
-    let end = cursor;
-    while (end < tag.length && !WebShortcutIconService.isWhitespace(tag.charAt(end)) && tag.charAt(end) !== '>') {
-      end++;
-    }
-    return WebShortcutIconService.htmlDecode(tag.substring(cursor, end));
-  }
-
-  private static isWhitespace(value: string): boolean {
-    return value === ' ' || value === '\n' || value === '\r' || value === '\t' || value === '\f';
-  }
-
-  private static isAttributeNameChar(value: string): boolean {
-    return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') ||
-      value === '-' || value === '_' || value === ':';
-  }
-
-  private static htmlDecode(value: string): string {
-    return value.replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, '\'')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
   }
 
   private static resolveUrl(baseUrl: string, value: string): string {

@@ -12,6 +12,7 @@ export interface WebSurfaceEntry {
   attached: boolean;
   initialized: boolean;
   visible: boolean;
+  scrollY: number;
   pullRefresh: PullRefreshState;
 }
 
@@ -35,6 +36,7 @@ export class WebBrowserSurfaceRegistry {
       attached: false,
       initialized: false,
       visible: false,
+      scrollY: 0,
       pullRefresh: WebPullRefresh.emptyState()
     };
     this.surfaces.push(surface);

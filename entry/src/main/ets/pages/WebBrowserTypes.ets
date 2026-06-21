@@ -21,6 +21,7 @@ export interface PullRefreshState {
   probeSerial: number;
   gestureLastOffsetY: number;
   gesturePullStartOffsetY: number;
+  gestureOverScrollActive: boolean;
 }
 
 export interface WebTabState {

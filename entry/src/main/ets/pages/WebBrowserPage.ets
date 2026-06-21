@@ -31,8 +31,10 @@ import {
   WebViewSurfaceFullScreenExitHandler,
   WebViewSurfaceLoadErrorEvent,
   WebViewSurfaceNavigationEvent,
+  WebViewSurfaceOverScrollEvent,
   WebViewSurfacePageEvent,
   WebViewSurfaceProgressEvent,
+  WebViewSurfaceScrollEvent,
   WebViewSurfaceTitleEvent,
   WebViewSurfaceFaviconEvent,
   WebViewSurfacePullGestureEvent
@@ -54,6 +56,7 @@ const WEB_BOOKMARKS_HOME_URL = 'about:smart-bookmarks';
 const WEB_BOOKMARKS_HOME_TAB_ID = 'smart_agent_web_bookmarks';
 const WEB_FULLSCREEN_PROBE_INTERVAL_MS = 450;
 const WEB_TOOLBAR_HIDE_GESTURE_DISTANCE = 22;
+const WEB_PULL_REFRESH_OVERSCROLL_DISTANCE = 24;
 const WEB_NOTICE_DURATION_MS = 2500;
 const WEB_BROWSER_PULL_REFRESH_POLICY_SCRIPT =
   'JSON.stringify((function(){' +
@@ -166,12 +169,6 @@ export struct WebBrowserPage {
   @State private addBookmarkConfirmTitle: string = '';
   @State private addBookmarkConfirmIcon: string = '';
   @State private addBookmarkConfirmBusy: boolean = false;
-  @State private desktopShortcutConfirmVisible: boolean = false;
-  @State private desktopShortcutConfirmId: string = '';
-  @State private desktopShortcutConfirmUrl: string = '';
-  @State private desktopShortcutConfirmTitle: string = '';
-  @State private desktopShortcutConfirmIcon: string = '';
-  @State private desktopShortcutConfirmBusy: boolean = false;
   @State private deleteBookmarkConfirmVisible: boolean = false;
   @State private deleteBookmarkConfirmId: string = '';
   @State private deleteBookmarkConfirmUrl: string = '';
@@ -207,6 +204,8 @@ export struct WebBrowserPage {
   private addBookmarkConfirmSerial: number = 0;
   private noticeTimer: number = -1;
   private explicitLoadErrorUrl: string = '';
+  private pendingLoadUrl: string = '';
+  private pendingLoadSurfaceKey: string = '';
   private pwaAppInfo: PwaAppInfo = WebShortcutIconService.emptyPwaAppInfo();
   private pwaInfoSerial: number = 0;
   @State private webSurfaceKeys: string[] = [];
@@ -290,6 +289,12 @@ export struct WebBrowserPage {
           onTrackerBlocked: (surfaceKey: string, host: string): void => {
             this.handleWebSurfaceTrackerBlocked(surfaceKey, host);
           },
+          onScroll: (surfaceKey: string, event: WebViewSurfaceScrollEvent): void => {
+            this.handleWebSurfaceScroll(surfaceKey, event);
+          },
+          onOverScroll: (surfaceKey: string, event: WebViewSurfaceOverScrollEvent): void => {
+            this.handleWebSurfaceOverScroll(surfaceKey, event);
+          },
           onPullGestureStart: (surfaceKey: string): void => {
             this.handleWebSurfacePullGestureStart(surfaceKey);
           },
@@ -332,13 +337,13 @@ export struct WebBrowserPage {
             this.openBookmark(bookmark);
           },
           onCreateDesktopShortcut: (bookmark: WebBookmarkEntry): void => {
-            this.confirmCreateDesktopShortcutFromBookmark(bookmark);
+            this.createDesktopShortcutFromBookmark(bookmark);
           },
           onDeleteBookmark: (bookmark: WebBookmarkEntry): void => {
             this.confirmDeleteBookmark(bookmark);
           },
           onClearHomeTabStack: (): void => {
-            this.onClearInstanceTabStack(WEB_HOME_TAB_ID, WEB_BOOKMARKS_HOME_URL);
+            this.onClearInstanceTabStack(WEB_HOME_TAB_ID, DEFAULT_WEB_HOME_URL);
           },
           onCloseBookmarkInstance: (bookmark: WebBookmarkEntry): void => {
             this.onCloseBookmarkInstance(bookmark);
@@ -369,16 +374,14 @@ export struct WebBrowserPage {
           notice: this.notice,
           webError: this.webError,
           pullRefreshVisible: this.activePullRefreshVisible(),
+          pullRefreshRefreshing: this.activePullRefreshRefreshing(),
           pullRefreshRotation: this.activePullRefreshRotation(),
           pullRefreshOffset: this.activePullRefreshIndicatorOffset(),
+          pullRefreshDistance: this.activePullRefreshDistance(),
           addBookmarkConfirmVisible: this.addBookmarkConfirmVisible,
           addBookmarkConfirmTitle: this.addBookmarkConfirmTitle,
           addBookmarkConfirmIcon: this.addBookmarkConfirmIcon,
           addBookmarkConfirmBusy: this.addBookmarkConfirmBusy,
-          desktopShortcutConfirmVisible: this.desktopShortcutConfirmVisible,
-          desktopShortcutConfirmTitle: this.desktopShortcutConfirmTitle,
-          desktopShortcutConfirmIcon: this.desktopShortcutConfirmIcon,
-          desktopShortcutConfirmBusy: this.desktopShortcutConfirmBusy,
           deleteBookmarkConfirmVisible: this.deleteBookmarkConfirmVisible,
           deleteBookmarkConfirmTitle: this.deleteBookmarkConfirmTitle,
           deleteBookmarkConfirmIcon: this.deleteBookmarkConfirmIcon,
@@ -410,12 +413,6 @@ export struct WebBrowserPage {
           },
           onSubmitAddBookmarkConfirm: (): void => {
             this.submitAddBookmarkConfirm();
-          },
-          onHideDesktopShortcutConfirm: (): void => {
-            this.hideDesktopShortcutConfirm();
-          },
-          onSubmitDesktopShortcutConfirm: (): void => {
-            this.submitDesktopShortcutConfirm();
           },
           onHideDeleteBookmarkConfirm: (): void => {
             this.hideDeleteBookmarkConfirm();
@@ -543,6 +540,7 @@ export struct WebBrowserPage {
     if (!this.shouldHandleWebSurface(surfaceKey)) {
       return;
     }
+    this.setWebSurfaceScrollY(surfaceKey, 0);
     this.setBrowserPullRefreshEnabled(surfaceKey, true);
     if (url.length > 0) {
       if (this.commitCurrentUrl(url)) {
@@ -651,9 +649,45 @@ export struct WebBrowserPage {
     hilog.warn(DOMAIN, TAG, 'arkweb prevented tracker cookie on host: %{public}s', host);
   }
 
+  private handleWebSurfaceScroll(surfaceKey: string, event: WebViewSurfaceScrollEvent): void {
+    const scrollY = Math.max(0, event.yOffset);
+    this.setWebSurfaceScrollY(surfaceKey, scrollY);
+    const surface = this.webSurfaceByKey(surfaceKey);
+    if (surface === undefined) {
+      return;
+    }
+    if (surface.scrollY > 1 && surface.pullRefresh.tracking && !surface.pullRefresh.refreshing) {
+      WebPullRefresh.reset(surface.pullRefresh);
+      this.bumpPullRefreshRevision();
+    }
+    if (surface.scrollY > 1) {
+      surface.pullRefresh.gestureOverScrollActive = false;
+    }
+  }
+
+  private setWebSurfaceScrollY(surfaceKey: string, scrollY: number): void {
+    const surface = this.webSurfaceByKey(surfaceKey);
+    if (surface !== undefined) {
+      surface.scrollY = Math.max(0, scrollY);
+    }
+  }
+
+  private handleWebSurfaceOverScroll(surfaceKey: string, event: WebViewSurfaceOverScrollEvent): void {
+    const pullRefresh = this.pullRefreshState(surfaceKey);
+    if (!this.shouldHandleWebSurface(surfaceKey) || this.webFullScreen || this.loading || pullRefresh.refreshing ||
+      !pullRefresh.browserRefreshEnabled) {
+      pullRefresh.gestureOverScrollActive = false;
+      return;
+    }
+    if (Math.abs(event.yOffset) >= WEB_PULL_REFRESH_OVERSCROLL_DISTANCE && this.currentScrollY(surfaceKey) <= 1) {
+      pullRefresh.gestureOverScrollActive = true;
+    }
+  }
+
   private handleWebSurfacePullGestureStart(surfaceKey: string): void {
     const pullRefresh = this.pullRefreshState(surfaceKey);
     pullRefresh.gestureLastOffsetY = 0;
+    pullRefresh.gestureOverScrollActive = false;
     if (pullRefresh.refreshing) {
       return;
     }
@@ -665,8 +699,6 @@ export struct WebBrowserPage {
       this.resetPullRefresh(surfaceKey);
       return;
     }
-    WebPullRefresh.beginTracking(pullRefresh, 0);
-    this.bumpPullRefreshRevision();
   }
 
   private handleWebSurfacePullGestureUpdate(surfaceKey: string, event: WebViewSurfacePullGestureEvent): void {
@@ -680,12 +712,14 @@ export struct WebBrowserPage {
       return;
     }
     if (!pullRefresh.tracking) {
-      if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled || this.currentScrollY(surfaceKey) > 1) {
+      if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled || !pullRefresh.gestureOverScrollActive ||
+        this.currentScrollY(surfaceKey) > 1) {
         return;
       }
       WebPullRefresh.beginTracking(pullRefresh, event.offsetY);
     }
-    if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled || this.currentScrollY(surfaceKey) > 1) {
+    if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled || !pullRefresh.gestureOverScrollActive ||
+      this.currentScrollY(surfaceKey) > 1) {
       this.resetPullRefresh(surfaceKey);
       return;
     }
@@ -702,11 +736,13 @@ export struct WebBrowserPage {
       return;
     }
     if (pullRefresh.tracking && pullRefresh.ready && pullRefresh.browserRefreshEnabled &&
+      pullRefresh.gestureOverScrollActive &&
       this.currentScrollY(surfaceKey) <= 1) {
       this.refreshAfterWebGestureCheck(surfaceKey);
       return;
     }
     this.cancelPullRefresh(surfaceKey);
+    pullRefresh.gestureOverScrollActive = false;
   }
 
   private handleBookmarkPullRefreshStart(): void {
@@ -767,6 +803,7 @@ export struct WebBrowserPage {
     this.bumpPullRefreshRevision();
     this.startPullRefreshSpin(this.webSurfaceKey);
     this.loadBookmarks(() => {
+      this.onBookmarksChanged();
       this.endPullRefresh(this.webSurfaceKey);
     });
   }
@@ -874,6 +911,7 @@ export struct WebBrowserPage {
     const stateKey = this.currentWebStateTabId();
     this.stopWebFullScreenProbe();
     this.restoringWebState = false;
+    this.clearPendingLoadUrl();
     this.nativeWebFullScreen = false;
     this.scriptDetectedWebFullScreen = false;
     this.webFullScreen = false;
@@ -955,6 +993,13 @@ export struct WebBrowserPage {
     this.controller = surface.controller;
     this.controllerAttached = true;
     this.configureAttachedController();
+    const pendingUrl = this.consumePendingLoadUrl(surfaceKey);
+    if (pendingUrl.length > 0) {
+      this.initialNavigationDone = true;
+      surface.initialized = true;
+      this.loadTabInitialUrl(pendingUrl);
+      return;
+    }
     if (!surface.initialized) {
       surface.initialized = true;
       this.openAttachedPage();
@@ -1005,7 +1050,6 @@ export struct WebBrowserPage {
       this.toolbarHidden = false;
       this.webError = this.emptyWebError();
       this.resetPullRefresh();
-      this.syncBookmarkHomeAddressText();
       this.rememberBookmarkHomeState();
       this.loadBookmarks();
       return;
@@ -1030,7 +1074,6 @@ export struct WebBrowserPage {
   private onBookmarkHomeVisibleFromHostChanged(): void {
     const nextBookmarkHomeVisible = this.canShowBookmarkHome() && this.bookmarkHomeVisibleFromHost;
     if (nextBookmarkHomeVisible && !this.bookmarkHomeVisible) {
-      this.rememberCurrentTabState();
       this.persistWebState();
     }
     this.bookmarkHomeVisible = nextBookmarkHomeVisible;
@@ -1044,7 +1087,6 @@ export struct WebBrowserPage {
       this.toolbarHidden = false;
       this.webError = this.emptyWebError();
       this.resetPullRefresh();
-      this.syncBookmarkHomeAddressText();
       this.rememberBookmarkHomeState();
       this.loadBookmarks();
       return;
@@ -1066,12 +1108,32 @@ export struct WebBrowserPage {
     return this.loadUrl(url);
   }
 
+  private setPendingLoadUrl(url: string): void {
+    this.pendingLoadUrl = this.normalizeUrl(url);
+    this.pendingLoadSurfaceKey = this.webSurfaceKey;
+  }
+
+  private consumePendingLoadUrl(surfaceKey: string): string {
+    if (this.pendingLoadUrl.length === 0 || this.pendingLoadSurfaceKey !== surfaceKey) {
+      return '';
+    }
+    const url = this.pendingLoadUrl;
+    this.clearPendingLoadUrl();
+    return url;
+  }
+
+  private clearPendingLoadUrl(): void {
+    this.pendingLoadUrl = '';
+    this.pendingLoadSurfaceKey = '';
+  }
+
   private loadUrl(url: string): boolean {
     const normalized = this.normalizeUrl(url);
     if (this.isBookmarkHomeUrl(normalized)) {
       this.onOpenBookmarkHome();
       return true;
     }
+    const switchingFromBookmarkHome = this.bookmarkHomeVisible;
     if (this.bookmarkHomeVisible) {
       this.onOpenHomeInstance();
       this.bookmarkHomeVisible = false;
@@ -1087,13 +1149,19 @@ export struct WebBrowserPage {
       this.bookmarkHomeVisible = false;
       this.updateWebSurfaceVisibility();
       this.warmupServiceWorker(normalized);
-      if (!this.controllerAttached) {
+      const surface = this.webSurfaceByKey(this.webSurfaceKey);
+      if (switchingFromBookmarkHome || !this.controllerAttached || (surface !== undefined && !surface.initialized)) {
+        this.setPendingLoadUrl(normalized);
         this.loading = true;
         this.progress = 0;
         this.clearNotice();
         this.webError = this.emptyWebError();
+        if (this.controllerAttached) {
+          this.activateAttachedSurface(this.webSurfaceKey);
+        }
         return true;
       }
+      this.clearPendingLoadUrl();
       this.controller.loadUrl(normalized);
       this.loading = true;
       this.progress = 8;
@@ -1316,7 +1384,7 @@ export struct WebBrowserPage {
         this.syncActiveTabStackSize();
         this.persistWebState();
         this.saveWebCookies();
-        this.onOpenBookmarkHome();
+        this.onClose();
         return true;
       }
       this.controller.backward();
@@ -1381,11 +1449,6 @@ export struct WebBrowserPage {
       clearTimeout(this.noticeTimer);
       this.noticeTimer = -1;
     }
-  }
-
-  private syncBookmarkHomeAddressText(): void {
-    this.currentUrl = WEB_BOOKMARKS_HOME_URL;
-    this.setAddressText(WEB_BOOKMARKS_HOME_URL);
   }
 
   private updateNavigationState(): void {
@@ -1488,13 +1551,11 @@ export struct WebBrowserPage {
     this.onTabStateChanged(update.state);
   }
 
-  private rememberBookmarkHomeState(backCount: number = -1): void {
-    const storedCount = this.tabBackCount(WEB_BOOKMARKS_HOME_TAB_ID);
-    const count = backCount >= 0 ? backCount : Math.max(storedCount, this.homeTabBackCountFromHost);
+  private rememberBookmarkHomeState(): void {
     const state: WebTabState = {
       id: WEB_BOOKMARKS_HOME_TAB_ID,
       url: WEB_BOOKMARKS_HOME_URL,
-      backCount: Math.max(0, count)
+      backCount: 0
     };
     this.webTabStates = WebBrowserTabModel.upsert(this.webTabStates, state);
     this.persistTabState(state);
@@ -1536,9 +1597,6 @@ export struct WebBrowserPage {
   }
 
   private currentWebStateTabId(): string {
-    if (this.bookmarkHomeVisible) {
-      return WEB_BOOKMARKS_HOME_TAB_ID;
-    }
     return this.safeFileSegment(this.instanceId);
   }
 
@@ -2135,7 +2193,6 @@ export struct WebBrowserPage {
   }
 
   private showBookmarkHome(): void {
-    this.rememberCurrentTabState();
     this.persistWebState();
     if (!this.canShowBookmarkHome()) {
       this.onOpenBookmarkHome();
@@ -2149,7 +2206,6 @@ export struct WebBrowserPage {
     this.toolbarHidden = false;
     this.webError = this.emptyWebError();
     this.resetPullRefresh();
-    this.syncBookmarkHomeAddressText();
     this.rememberBookmarkHomeState();
     this.loadBookmarks();
   }
@@ -2225,41 +2281,6 @@ export struct WebBrowserPage {
     }
   }
 
-  private confirmCreateDesktopShortcutFromBookmark(bookmark: WebBookmarkEntry): void {
-    if (this.bookmarkDropBusy || this.desktopShortcutConfirmBusy) {
-      return;
-    }
-    this.desktopShortcutConfirmId = bookmark.id;
-    this.desktopShortcutConfirmUrl = bookmark.url;
-    this.desktopShortcutConfirmTitle = bookmark.title;
-    this.desktopShortcutConfirmIcon = this.bookmarkIconFileSource(bookmark.url);
-    this.desktopShortcutConfirmBusy = false;
-    this.desktopShortcutConfirmVisible = true;
-  }
-
-  private hideDesktopShortcutConfirm(): void {
-    this.desktopShortcutConfirmVisible = false;
-    this.desktopShortcutConfirmBusy = false;
-    this.desktopShortcutConfirmId = '';
-    this.desktopShortcutConfirmUrl = '';
-    this.desktopShortcutConfirmTitle = '';
-    this.desktopShortcutConfirmIcon = '';
-  }
-
-  private submitDesktopShortcutConfirm(): void {
-    if (this.desktopShortcutConfirmBusy || this.desktopShortcutConfirmUrl.length === 0) {
-      return;
-    }
-    const bookmark: WebBookmarkEntry = {
-      id: this.desktopShortcutConfirmId,
-      url: this.desktopShortcutConfirmUrl,
-      title: this.desktopShortcutConfirmTitle,
-      updatedAt: 0
-    };
-    this.desktopShortcutConfirmBusy = true;
-    this.createDesktopShortcutFromBookmark(bookmark);
-  }
-
   private createDesktopShortcutFromBookmark(bookmark: WebBookmarkEntry): void {
     if (this.bookmarkDropBusy) {
       return;
@@ -2269,10 +2290,8 @@ export struct WebBrowserPage {
     this.prepareShortcutIcons(context, bookmark.url, true).then(() => {
       this.requestPinShortcut(context, bookmark.url, bookmark.title, bookmark.id);
       this.bookmarkDropBusy = false;
-      this.hideDesktopShortcutConfirm();
     }).catch((err: BusinessError) => {
       this.bookmarkDropBusy = false;
-      this.desktopShortcutConfirmBusy = false;
       this.showNotice('创建桌面快捷方式失败：' + this.formatError(err));
     });
   }
@@ -2429,7 +2448,7 @@ export struct WebBrowserPage {
       return {
         id: id,
         url: WEB_BOOKMARKS_HOME_URL,
-        backCount: Math.max(0, state.backCount)
+        backCount: 0
       };
     }
     if (this.isBookmarkHomeUrl(state.url)) {
@@ -2503,12 +2522,20 @@ export struct WebBrowserPage {
     return WebPullRefresh.shouldShowIndicator(this.activePullRefreshState());
   }
 
+  private activePullRefreshRefreshing(): boolean {
+    return WebPullRefresh.isRefreshing(this.activePullRefreshState());
+  }
+
   private activePullRefreshRotation(): number {
     return WebPullRefresh.activeRotation(this.activePullRefreshState());
   }
 
   private activePullRefreshIndicatorOffset(): number {
     return WebPullRefresh.indicatorOffset(this.activePullRefreshState());
+  }
+
+  private activePullRefreshDistance(): number {
+    return WebPullRefresh.distance(this.activePullRefreshState());
   }
 
   private updatePullRefresh(surfaceKey: string, deltaFromStart: number): void {
@@ -2563,12 +2590,10 @@ export struct WebBrowserPage {
 
   private currentScrollY(surfaceKey: string): number {
     const surface = this.webSurfaceByKey(surfaceKey);
-    const controller = surface !== undefined ? surface.controller : this.controller;
-    try {
-      return controller.getScrollOffset().y;
-    } catch (err) {
-      return 0;
+    if (surface !== undefined) {
+      return surface.scrollY;
     }
+    return Number.MAX_SAFE_INTEGER;
   }
 
   private isBrowserStateUrl(url: string): boolean {

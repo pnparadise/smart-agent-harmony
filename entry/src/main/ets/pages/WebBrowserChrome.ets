@@ -32,16 +32,14 @@ export struct WebBrowserChrome {
     kind: ''
   };
   @Prop pullRefreshVisible: boolean = false;
+  @Prop pullRefreshRefreshing: boolean = false;
   @Prop pullRefreshRotation: number = 0;
   @Prop pullRefreshOffset: number = 0;
+  @Prop pullRefreshDistance: number = 0;
   @Prop addBookmarkConfirmVisible: boolean = false;
   @Prop addBookmarkConfirmTitle: string = '';
   @Prop addBookmarkConfirmIcon: string = '';
   @Prop addBookmarkConfirmBusy: boolean = false;
-  @Prop desktopShortcutConfirmVisible: boolean = false;
-  @Prop desktopShortcutConfirmTitle: string = '';
-  @Prop desktopShortcutConfirmIcon: string = '';
-  @Prop desktopShortcutConfirmBusy: boolean = false;
   @Prop deleteBookmarkConfirmVisible: boolean = false;
   @Prop deleteBookmarkConfirmTitle: string = '';
   @Prop deleteBookmarkConfirmIcon: string = '';
@@ -56,8 +54,6 @@ export struct WebBrowserChrome {
   onAddBookmark: () => void = () => {};
   onHideAddBookmarkConfirm: () => void = () => {};
   onSubmitAddBookmarkConfirm: () => void = () => {};
-  onHideDesktopShortcutConfirm: () => void = () => {};
-  onSubmitDesktopShortcutConfirm: () => void = () => {};
   onHideDeleteBookmarkConfirm: () => void = () => {};
   onSubmitDeleteBookmarkConfirm: () => void = () => {};
   onReloadWebError: () => void = () => {};
@@ -82,10 +78,6 @@ export struct WebBrowserChrome {
 
       if (this.addBookmarkConfirmVisible) {
         this.buildAddBookmarkConfirm();
-      }
-
-      if (this.desktopShortcutConfirmVisible) {
-        this.buildDesktopShortcutConfirm();
       }
 
       if (this.deleteBookmarkConfirmVisible) {
@@ -370,25 +362,6 @@ export struct WebBrowserChrome {
   }
 
   @Builder
-  private buildDesktopShortcutConfirm() {
-    WebBrowserConfirmDialog({
-      heading: '添加到桌面',
-      title: this.desktopShortcutConfirmTitle,
-      icon: this.desktopShortcutConfirmIcon,
-      busy: this.desktopShortcutConfirmBusy,
-      submitText: this.desktopShortcutConfirmBusy ? '处理中' : '添加',
-      submitColor: PRIMARY_BLUE,
-      zIndexValue: 46,
-      onCancel: (): void => {
-        this.onHideDesktopShortcutConfirm();
-      },
-      onSubmit: (): void => {
-        this.onSubmitDesktopShortcutConfirm();
-      }
-    });
-  }
-
-  @Builder
   private buildDeleteBookmarkConfirm() {
     WebBrowserConfirmDialog({
       heading: '删除书签',
@@ -487,16 +460,18 @@ export struct WebBrowserChrome {
   }
 
   private pullRefreshTopPosition(): number {
-    const position = this.pullRefreshTopOffset() + this.pullRefreshOffset;
     if (!this.showToolbar || this.toolbarHidden) {
-      return Math.max(this.statusBarPadding(), position);
+      if (this.pullRefreshRefreshing) {
+        return this.statusBarPadding() + Math.max(0, this.pullRefreshOffset);
+      }
+      return this.statusBarPadding() + Math.max(0, this.pullRefreshDistance);
     }
-    return position;
+    return this.pullRefreshTopOffset() + this.pullRefreshOffset;
   }
 
   private hasBlockingOverlay(): boolean {
     return this.pullRefreshVisible || this.webError.visible ||
-      this.addBookmarkConfirmVisible || this.desktopShortcutConfirmVisible || this.deleteBookmarkConfirmVisible;
+      this.addBookmarkConfirmVisible || this.deleteBookmarkConfirmVisible;
   }
 
   private toolbarContentHeight(): number {

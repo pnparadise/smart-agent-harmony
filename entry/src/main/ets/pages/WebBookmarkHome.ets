@@ -6,7 +6,6 @@ import {
 
 const BOOKMARK_TILE_HEIGHT = 104;
 const BOOKMARK_DOCK_HEIGHT = 132;
-const BOOKMARK_DOCK_BUTTON_WIDTH = 132;
 const BOOKMARK_DOCK_BUTTON_HEIGHT = 104;
 const BOOKMARK_ICON_STACK_WIDTH = 70;
 const BOOKMARK_ICON_STACK_HEIGHT = 62;
@@ -17,6 +16,11 @@ const BOOKMARK_TILE_BACKGROUND = '#00000000';
 const BOOKMARK_DROP_ACTION_NONE = '';
 const BOOKMARK_DROP_ACTION_DESKTOP = 'desktop';
 const BOOKMARK_DROP_ACTION_DELETE = 'delete';
+
+interface BookmarkDropActionInnerGradient {
+  angle: number;
+  colors: Array<[ResourceColor, number]>;
+}
 
 @Component
 export struct WebBookmarkHome {
@@ -293,14 +297,14 @@ export struct WebBookmarkHome {
           this.buildBookmarkDropAction(BOOKMARK_DROP_ACTION_DESKTOP);
           this.buildBookmarkDropAction(BOOKMARK_DROP_ACTION_DELETE);
         }
-        .width(BOOKMARK_DOCK_BUTTON_WIDTH * 2 + 14)
+        .width('100%')
         .height(BOOKMARK_DOCK_BUTTON_HEIGHT)
-        .justifyContent(FlexAlign.SpaceBetween)
+        .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
       }
       .width('100%')
       .height(BOOKMARK_DOCK_HEIGHT)
-      .padding({ bottom: 18 })
+      .padding({ left: 18, right: 18, bottom: 18 })
     }
     .width('100%')
     .height('100%')
@@ -315,8 +319,16 @@ export struct WebBookmarkHome {
           Column()
             .width(58)
             .height(58)
-            .backgroundColor(this.bookmarkDropActionAccentColor(action))
+            .linearGradient(this.bookmarkDropActionInnerGradient(action))
             .borderRadius(29)
+            .shadow({
+              radius: 14,
+              color: action === BOOKMARK_DROP_ACTION_DELETE ? '#30EF3B2D' : '#303478F6',
+              offsetX: 0,
+              offsetY: 5
+            })
+            .scale({ x: 1, y: 1 })
+            .animation({ duration: 150, curve: Curve.EaseOut })
         }
 
         if (action === BOOKMARK_DROP_ACTION_DELETE) {
@@ -334,21 +346,17 @@ export struct WebBookmarkHome {
       .width(64)
       .height(64)
 
-      Text(action === BOOKMARK_DROP_ACTION_DELETE ? '删除' : '桌面')
-        .fontSize(14)
+      Text(action === BOOKMARK_DROP_ACTION_DELETE ? '删除' : '添加桌面')
+        .fontSize(13)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.bookmarkDropActionTextColor(action))
         .margin({ top: 2 })
     }
-    .width(BOOKMARK_DOCK_BUTTON_WIDTH)
+    .layoutWeight(1)
     .height(BOOKMARK_DOCK_BUTTON_HEIGHT)
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor(this.bookmarkDropActionBackgroundColor(action))
-    .borderRadius(18)
-    .shadow({ radius: 12, color: this.isBookmarkDropActionActive(action) ? '#26000000' : '#10000000',
-      offsetX: 0, offsetY: 4 })
-    .scale(this.isBookmarkDropActionActive(action) ? { x: 1.06, y: 1.06 } : { x: 1, y: 1 })
+    .scale(this.isBookmarkDropActionActive(action) ? { x: 1.05, y: 1.05 } : { x: 1, y: 1 })
     .opacity(this.isBookmarkDropActionInactive(action) ? 0.62 : 1)
     .animation({ duration: 150, curve: Curve.EaseOut })
     .onDragEnter((event?: DragEvent) => {
@@ -637,25 +645,24 @@ export struct WebBookmarkHome {
     return this.bookmarkDropAction !== BOOKMARK_DROP_ACTION_NONE && this.bookmarkDropAction !== action;
   }
 
-  private bookmarkDropActionBackgroundColor(action: string): string {
+  private bookmarkDropActionInnerGradient(action: string): BookmarkDropActionInnerGradient {
     if (action === BOOKMARK_DROP_ACTION_DELETE) {
-      return this.isBookmarkDropActionActive(action) ? '#FFE6E6' : '#FFF4F4';
+      return {
+        angle: 135,
+        colors: [['#FF5A5A', 0.0], ['#D92D20', 1.0]]
+      };
     }
-    return this.isBookmarkDropActionActive(action) ? '#E4F2FF' : '#F3F9FF';
-  }
-
-  private bookmarkDropActionAccentColor(action: string): string {
-    if (action === BOOKMARK_DROP_ACTION_DELETE) {
-      return '#EF3B2D';
-    }
-    return '#D8EBFF';
+    return {
+      angle: 135,
+      colors: [['#D8EAFF', 0.0], ['#7EB6FF', 1.0]]
+    };
   }
 
   private bookmarkDropActionTextColor(action: string): string {
     if (action === BOOKMARK_DROP_ACTION_DELETE) {
-      return this.isBookmarkDropActionActive(action) ? '#EF3B2D' : '#9AA3AE';
+      return this.isBookmarkDropActionActive(action) ? '#D92D20' : '#7F8896';
     }
-    return this.isBookmarkDropActionActive(action) ? '#3478F6' : '#8B97A6';
+    return this.isBookmarkDropActionActive(action) ? '#1F6FEB' : '#7F8896';
   }
 
   private finishBookmarkDrag(): void {

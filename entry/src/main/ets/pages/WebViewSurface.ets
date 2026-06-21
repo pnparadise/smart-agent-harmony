@@ -50,6 +50,16 @@ export interface WebViewSurfacePullGestureEvent {
   offsetY: number;
 }
 
+export interface WebViewSurfaceScrollEvent {
+  xOffset: number;
+  yOffset: number;
+}
+
+export interface WebViewSurfaceOverScrollEvent {
+  xOffset: number;
+  yOffset: number;
+}
+
 class WebViewSurfaceFullScreenExitHandlerImpl implements WebViewSurfaceFullScreenExitHandler {
   private handler: FullScreenExitHandler;
 
@@ -92,6 +102,8 @@ export struct WebViewSurface {
   onTitleReceive: (event: WebViewSurfaceTitleEvent) => void = () => {};
   onFaviconReceived: (event: WebViewSurfaceFaviconEvent) => void = () => {};
   onTrackerBlocked: (host: string) => void = () => {};
+  onScroll: (event: WebViewSurfaceScrollEvent) => void = () => {};
+  onOverScroll: (event: WebViewSurfaceOverScrollEvent) => void = () => {};
   onPullGestureStart: () => void = () => {};
   onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent) => void = () => {};
   onPullGestureEnd: () => void = () => {};
@@ -185,6 +197,18 @@ export struct WebViewSurface {
       })
       .onIntelligentTrackingPreventionResult((event) => {
         this.onTrackerBlocked(event ? event.host ?? '' : '');
+      })
+      .onScroll((event) => {
+        this.onScroll({
+          xOffset: event ? event.xOffset : 0,
+          yOffset: event ? event.yOffset : 0
+        });
+      })
+      .onOverScroll((event) => {
+        this.onOverScroll({
+          xOffset: event ? event.xOffset : 0,
+          yOffset: event ? event.yOffset : 0
+        });
       })
       .onFullScreenEnter((event) => {
         hilog.info(DOMAIN, TAG, 'web fullscreen enter video=%{public}dx%{public}d',
@@ -284,14 +308,6 @@ export struct WebViewSurface {
       return this.controller.getUrl();
     } catch (err) {
       return '';
-    }
-  }
-
-  currentScrollY(): number {
-    try {
-      return this.controller.getScrollOffset().y;
-    } catch (err) {
-      return 0;
     }
   }
 

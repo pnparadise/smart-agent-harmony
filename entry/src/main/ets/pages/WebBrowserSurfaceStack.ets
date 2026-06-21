@@ -4,8 +4,10 @@ import {
   WebViewSurfaceFullScreenEvent,
   WebViewSurfaceLoadErrorEvent,
   WebViewSurfaceNavigationEvent,
+  WebViewSurfaceOverScrollEvent,
   WebViewSurfacePageEvent,
   WebViewSurfaceProgressEvent,
+  WebViewSurfaceScrollEvent,
   WebViewSurfaceTitleEvent,
   WebViewSurfaceFaviconEvent,
   WebViewSurfacePullGestureEvent
@@ -32,6 +34,8 @@ export struct WebBrowserSurfaceStack {
   onTitleReceive: (surfaceKey: string, event: WebViewSurfaceTitleEvent) => void = () => {};
   onFaviconReceived: (surfaceKey: string, event: WebViewSurfaceFaviconEvent) => void = () => {};
   onTrackerBlocked: (surfaceKey: string, host: string) => void = () => {};
+  onScroll: (surfaceKey: string, event: WebViewSurfaceScrollEvent) => void = () => {};
+  onOverScroll: (surfaceKey: string, event: WebViewSurfaceOverScrollEvent) => void = () => {};
   onPullGestureStart: (surfaceKey: string) => void = () => {};
   onPullGestureUpdate: (surfaceKey: string, event: WebViewSurfacePullGestureEvent) => void = () => {};
   onPullGestureEnd: (surfaceKey: string) => void = () => {};
@@ -71,6 +75,12 @@ export struct WebBrowserSurfaceStack {
           },
           onTrackerBlocked: (host: string): void => {
             this.onTrackerBlocked(surfaceKey, host);
+          },
+          onScroll: (event: WebViewSurfaceScrollEvent): void => {
+            this.onScroll(surfaceKey, event);
+          },
+          onOverScroll: (event: WebViewSurfaceOverScrollEvent): void => {
+            this.onOverScroll(surfaceKey, event);
           },
           onPullGestureStart: (): void => {
             this.onPullGestureStart(surfaceKey);
