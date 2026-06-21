@@ -234,13 +234,13 @@ impl TunnelRuntime {
             return Err(error("invalid TUN fd"));
         }
         if self.running.swap(true, Ordering::SeqCst) {
-            close_if_valid(tun_fd);
             return Ok(());
         }
 
+        // The original TUN fd is owned by the HarmonyOS VpnConnection.
+        // Keep it open so VpnConnection.destroy() can close the same fd it created.
         if let Err(err) = set_nonblocking(tun_fd, true) {
             self.running.store(false, Ordering::SeqCst);
-            close_if_valid(tun_fd);
             return Err(err);
         }
         let tun_for_read = unsafe { libc::dup(tun_fd) };
@@ -251,7 +251,6 @@ impl TunnelRuntime {
             close_if_valid(tun_for_write);
             return Err(to_error(io::Error::last_os_error()));
         }
-        close_if_valid(tun_fd);
         let tun_for_read = unsafe { OwnedFd::from_raw_fd(tun_for_read) };
         let tun_for_write = unsafe { OwnedFd::from_raw_fd(tun_for_write) };
 

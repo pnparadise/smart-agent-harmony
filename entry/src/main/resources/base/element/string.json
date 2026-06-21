@@ -11,6 +11,14 @@
     {
       "name": "entry_desc",
       "value": "WireGuard control surface"
+    },
+    {
+      "name": "web_shortcut_label",
+      "value": "Smart Web"
+    },
+    {
+      "name": "browser_shortcut_label",
+      "value": "Browser"
     }
   ]
 }

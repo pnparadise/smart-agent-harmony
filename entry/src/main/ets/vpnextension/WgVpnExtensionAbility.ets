@@ -22,7 +22,7 @@ import {
   ParsedCidr,
   WireGuardConfig
 } from '../wireguard/WireGuardConfig';
-import { NativeTunnel } from '../wireguard/NativeTunnel';
+import { NativeTunnel, TunnelStats } from '../wireguard/NativeTunnel';
 import { updateVpnDataTransferNotification } from '../wireguard/VpnBackgroundTask';
 
 const DOMAIN = 0x0001;
@@ -39,23 +39,34 @@ interface LoggedVpnConfig extends vpnExtension.VpnConfig {
   blockedApplications?: string[];
 }
 
+interface DesiredVpnState {
+  activeInfo: ActiveTunnelInfo;
+  appSplitEnabled: boolean;
+  selectedSplitApps: SplitAppInfo[];
+  fingerprint: string;
+}
+
 export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private vpnConnection?: vpnExtension.VpnConnection;
   private netConnection?: connection.NetConnection;
   private tunnelHandle: number = 0;
   private activeTunnelId: string = '';
   private activeTunnelName: string = '';
+  private runningConfigFingerprint: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
   private dataTransferNotificationTimer: number = -1;
   private lastNotifiedTxBytes: number = -1;
   private lastNotifiedRxBytes: number = -1;
+  private lastLoggedTunReadPackets: number = -1;
+  private lastLoggedTunDroppedPackets: number = -1;
+  private lastLoggedUdpReadPackets: number = -1;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     if (this.isRefreshStatusWant(want)) {
-      this.publishRuntimeStatus(false, false).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'publish cold refresh status failed: %{public}s', this.formatError(err));
+      this.restoreOrPublishColdStatus().catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'handle cold refresh status failed: %{public}s', this.formatError(err));
       });
       return;
     }
@@ -66,6 +77,24 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         hilog.warn(DOMAIN, TAG, 'cleanup after start failure failed: %{public}s', this.formatError(cleanupErr));
       });
     });
+  }
+
+  private async restoreOrPublishColdStatus(): Promise<void> {
+    const activeInfo = await loadActiveTunnelInfo(this.context as common.VpnExtensionContext, true);
+    if (activeInfo.configText.length === 0) {
+      hilog.info(DOMAIN, TAG, 'cold refresh status, no active tunnel');
+      await this.publishRuntimeStatus(false, false);
+      return;
+    }
+
+    hilog.warn(
+      DOMAIN,
+      TAG,
+      'cold refresh status with active tunnel, restoring id=%{public}s name=%{public}s',
+      activeInfo.id,
+      activeInfo.name
+    );
+    await this.restartWireGuard('coldRefreshStatusRestore', false);
   }
 
   onRequest(want: Want, startId: number): void {
@@ -110,25 +139,35 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async doRestartWireGuard(reason: string, cleanupFirst: boolean): Promise<void> {
+    const desiredState = await this.resolveDesiredVpnState();
     hilog.info(
       DOMAIN,
       TAG,
-      'restartWireGuard reason=%{public}s cleanupFirst=%{public}s handle=%{public}d activeId=%{public}s',
+      'restartWireGuard reason=%{public}s cleanupFirst=%{public}s handle=%{public}d activeId=%{public}s desiredId=%{public}s',
       reason,
       String(cleanupFirst),
       this.tunnelHandle,
-      this.activeTunnelId
+      this.activeTunnelId,
+      desiredState.activeInfo.id
     );
+    if (this.canReuseRunningTunnel(desiredState)) {
+      this.activeTunnelId = desiredState.activeInfo.id;
+      this.activeTunnelName = desiredState.activeInfo.name;
+      hilog.info(DOMAIN, TAG, 'skip restart, running vpn config unchanged reason=%{public}s', reason);
+      await this.publishRuntimeStatus(true, true);
+      return;
+    }
     if (cleanupFirst || this.tunnelHandle !== 0 || this.vpnConnection !== undefined) {
       await this.cleanup(false);
     }
-    await this.startWireGuard();
+    await this.startWireGuard(desiredState);
   }
 
-  private async startWireGuard(): Promise<void> {
+  private async startWireGuard(desiredState?: DesiredVpnState): Promise<void> {
     hilog.info(DOMAIN, TAG, 'startWireGuard begin');
 
-    const activeInfo = await this.resolveActiveTunnelInfo();
+    const desired = desiredState === undefined ? await this.resolveDesiredVpnState() : desiredState;
+    const activeInfo = desired.activeInfo;
     this.activeTunnelId = activeInfo.id;
     this.activeTunnelName = activeInfo.name;
     hilog.info(
@@ -187,9 +226,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       await this.vpnConnection.protect(socketFd);
       hilog.info(DOMAIN, TAG, 'native socket protected');
 
-      const appSplitEnabled = await loadAppSplitEnabled(this.context as common.VpnExtensionContext, true);
-      const selectedSplitApps = await loadSelectedSplitApps(this.context as common.VpnExtensionContext, true);
-      const vpnConfig = this.buildVpnConfig(config, appSplitEnabled, selectedSplitApps);
+      const vpnConfig = this.buildVpnConfig(config, desired.appSplitEnabled, desired.selectedSplitApps);
       const vpnMtu = vpnConfig.mtu === undefined ? 0 : vpnConfig.mtu;
       const loggedVpnConfig = vpnConfig as LoggedVpnConfig;
       const trustedApplications =
@@ -204,7 +241,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         vpnMtu,
         String(vpnConfig.isIPv4Accepted),
         String(vpnConfig.isIPv6Accepted),
-        String(appSplitEnabled),
+        String(desired.appSplitEnabled),
         trustedApplications.length
       );
       this.logVpnConfigDetails(vpnConfig);
@@ -214,6 +251,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
       NativeTunnel.start(this.tunnelHandle, tunFd);
       hilog.info(DOMAIN, TAG, 'native tunnel started');
+      this.runningConfigFingerprint = desired.fingerprint;
       this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
       this.startDataTransferNotificationUpdates();
@@ -236,6 +274,58 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     ).catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'append vpn restart log failed: %{public}s', this.formatError(err));
     });
+  }
+
+  private async resolveDesiredVpnState(): Promise<DesiredVpnState> {
+    const activeInfo = await this.resolveActiveTunnelInfo();
+    const appSplitEnabled = await loadAppSplitEnabled(this.context as common.VpnExtensionContext, true);
+    const selectedSplitApps = await loadSelectedSplitApps(this.context as common.VpnExtensionContext, true);
+    return {
+      activeInfo: activeInfo,
+      appSplitEnabled: appSplitEnabled,
+      selectedSplitApps: selectedSplitApps,
+      fingerprint: this.buildVpnStateFingerprint(activeInfo, appSplitEnabled, selectedSplitApps)
+    };
+  }
+
+  private canReuseRunningTunnel(desiredState: DesiredVpnState): boolean {
+    return this.tunnelHandle !== 0 &&
+      this.vpnConnection !== undefined &&
+      this.runningConfigFingerprint.length > 0 &&
+      this.runningConfigFingerprint === desiredState.fingerprint;
+  }
+
+  private buildVpnStateFingerprint(
+    activeInfo: ActiveTunnelInfo,
+    appSplitEnabled: boolean,
+    selectedSplitApps: SplitAppInfo[]
+  ): string {
+    return this.joinFingerprintParts([
+      activeInfo.configText,
+      String(appSplitEnabled),
+      this.normalizedSplitBundleNames(selectedSplitApps).join(',')
+    ]);
+  }
+
+  private normalizedSplitBundleNames(apps: SplitAppInfo[]): string[] {
+    const bundleNames: string[] = [];
+    for (let index = 0; index < apps.length; index++) {
+      const bundleName = apps[index].bundleName.trim();
+      if (bundleName.length > 0 && !this.hasBundleName(bundleNames, bundleName)) {
+        bundleNames.push(bundleName);
+      }
+    }
+    bundleNames.sort();
+    return bundleNames;
+  }
+
+  private joinFingerprintParts(parts: string[]): string {
+    const encodedParts: string[] = [];
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index];
+      encodedParts.push(String(part.length) + ':' + part);
+    }
+    return encodedParts.join('|');
   }
 
   private async resolveConfigText(): Promise<string> {
@@ -475,6 +565,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.stopNetworkObserver();
     this.stopDataTransferNotificationUpdates();
     this.lastForceHandshakeAt = 0;
+    this.runningConfigFingerprint = '';
 
     if (this.tunnelHandle !== 0) {
       hilog.info(DOMAIN, TAG, 'stopping native tunnel');
@@ -527,6 +618,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     const stats = NativeTunnel.stats(this.tunnelHandle);
+    this.logNativePacketStats(stats);
     const txBytes = stats.txBytes;
     const rxBytes = stats.rxBytes;
     if (txBytes === this.lastNotifiedTxBytes && rxBytes === this.lastNotifiedRxBytes) {
@@ -634,6 +726,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         latestPacketSentSeconds = stats.latestPacketSentSeconds;
         loss = stats.loss;
         rttMillis = stats.rttMillis;
+        this.logNativePacketStats(stats);
       } catch (err) {
         const error = err as BusinessError;
         hilog.warn(DOMAIN, TAG, 'read native stats failed: %{public}s', this.formatError(error));
@@ -665,6 +758,28 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       updatedAt: Date.now()
     };
     await saveTunnelRuntimeStatus(this.context as common.VpnExtensionContext, status);
+  }
+
+  private logNativePacketStats(stats: TunnelStats): void {
+    if (stats.tunReadPackets === this.lastLoggedTunReadPackets &&
+      stats.tunDroppedPackets === this.lastLoggedTunDroppedPackets &&
+      stats.udpReadPackets === this.lastLoggedUdpReadPackets) {
+      return;
+    }
+
+    this.lastLoggedTunReadPackets = stats.tunReadPackets;
+    this.lastLoggedTunDroppedPackets = stats.tunDroppedPackets;
+    this.lastLoggedUdpReadPackets = stats.udpReadPackets;
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'native packet stats tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunReadLast=%{public}s tunWriteLast=%{public}s',
+      stats.tunReadPackets,
+      stats.tunDroppedPackets,
+      stats.udpReadPackets,
+      stats.tunReadLast,
+      stats.tunWriteLast
+    );
   }
 
   private isRefreshStatusWant(want: Want): boolean {

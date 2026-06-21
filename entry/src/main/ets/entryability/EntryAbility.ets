@@ -3,6 +3,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { webview } from '@kit.ArkWeb';
 import {
   loadActiveTunnelInfo,
   loadLastVpnRestoreAt,
@@ -10,6 +11,8 @@ import {
   loadTunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
 import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
+import { syncWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
+import { activateImmersiveWindow, configureImmersiveWindow } from './ImmersiveWindow';
 
 const DOMAIN = 0x0001;
 const TAG = 'EntryAbility';
@@ -22,9 +25,11 @@ const VPN_RESTORE_DEBOUNCE_MS = 2000;
 export default class EntryAbility extends UIAbility {
   private lastVpnRestoreAt: number = 0;
   private vpnRestoreInFlight: boolean = false;
+  private windowStage?: window.WindowStage;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
+    this.initializeWebEngine();
     this.restoreVpnIfNeeded('onCreate').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on create failed: %{public}s', this.formatError(err));
     });
@@ -35,24 +40,41 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    this.windowStage = windowStage;
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, TAG, 'loadContent failed: %{public}s', JSON.stringify(err));
         return;
       }
+      configureImmersiveWindow(windowStage, DOMAIN, TAG);
+      this.activateWindow();
       hilog.info(DOMAIN, TAG, 'loadContent succeeded');
     });
   }
 
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    hilog.info(DOMAIN, TAG, 'onNewWant');
+  }
+
   onWindowStageDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onWindowStageDestroy');
+    this.windowStage = undefined;
   }
 
   onForeground(): void {
     hilog.info(DOMAIN, TAG, 'onForeground');
+    this.activateWindow();
     this.restoreVpnIfNeeded('onForeground').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on foreground failed: %{public}s', this.formatError(err));
     });
+  }
+
+  private activateWindow(): void {
+    const stage = this.windowStage;
+    if (stage === undefined) {
+      return;
+    }
+    activateImmersiveWindow(stage, DOMAIN, TAG);
   }
 
   onBackground(): void {
@@ -141,6 +163,19 @@ export default class EntryAbility extends UIAbility {
       }
     };
     return want;
+  }
+
+  private initializeWebEngine(): void {
+    try {
+      webview.WebviewController.initializeWebEngine();
+      hilog.info(DOMAIN, TAG, 'web engine initialized');
+      syncWebHttpDnsFromDohSettings(this.context).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'sync web httpdns failed: %{public}s', this.formatError(err));
+      });
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'initialize web engine failed: %{public}s', this.formatError(error));
+    }
   }
 
   private formatError(error: BusinessError): string {

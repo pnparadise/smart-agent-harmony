@@ -36,6 +36,7 @@ import {
   TunnelConfig,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
+import { applyWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
 import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 import { AppPickerPage } from './AppPickerPage';
@@ -62,6 +63,7 @@ const ISSUE_REPORT_URL = 'https://github.com/pnparadise/smart-agent-harmony';
 const MAX_IMPORT_CONFIG_BYTES = 64 * 1024;
 const STATUS_REFRESH_INTERVAL_MS = 3000;
 const STARTUP_GRACE_MS = 15000;
+const RUNTIME_STOP_GRACE_MS = 15000;
 const TAB_TUNNELS = 0;
 const TAB_RULES = 1;
 const TAB_LOGS = 2;
@@ -93,6 +95,8 @@ const PRESET_SPLIT_APPS: SplitAppInfo[] = [
 @Entry
 @Component
 struct Index {
+  @StorageProp('topRectHeight') private topRectHeight: number = 0;
+  @StorageProp('bottomRectHeight') private bottomRectHeight: number = 0;
   @State private tunnels: TunnelConfig[] = [];
   @State private statusText: string = 'Idle';
   @State private busy: boolean = false;
@@ -200,6 +204,7 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .backgroundColor(PAGE_BACKGROUND)
   }
 
@@ -272,8 +277,9 @@ struct Index {
         })
     }
     .width('100%')
-    .padding({ left: 20, right: 20, top: 22, bottom: 18 })
+    .padding({ left: 20, right: 20, top: this.statusBarPadding() + 22, bottom: 18 })
     .backgroundColor(CARD_BACKGROUND)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .shadow({ radius: 14, color: '#10000000', offsetX: 0, offsetY: 2 })
     .zIndex(2)
   }
@@ -332,8 +338,9 @@ struct Index {
         })
     }
     .width('100%')
-    .padding({ left: 20, right: 20, top: 22, bottom: 18 })
+    .padding({ left: 20, right: 20, top: this.statusBarPadding() + 22, bottom: 18 })
     .backgroundColor(CARD_BACKGROUND)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     .shadow({ radius: 14, color: '#10000000', offsetX: 0, offsetY: 2 })
     .zIndex(2)
   }
@@ -341,21 +348,26 @@ struct Index {
   @Builder
   private buildMainHeader() {
     Row() {
-      Image($r('app.media.ic_key_blue'))
-        .width(24)
-        .height(24)
-        .margin({ right: 12 })
-      Text('SmartAgent')
-        .fontSize(23)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(TEXT_PRIMARY)
-        .maxLines(1)
+      Row() {
+        Image($r('app.media.ic_key_blue'))
+          .width(24)
+          .height(24)
+          .margin({ right: 12 })
+        Text('SmartAgent')
+          .fontSize(23)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(TEXT_PRIMARY)
+          .maxLines(1)
+      }
+      .layoutWeight(1)
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
-    .height(76)
+    .height(this.statusBarPadding() + 76)
     .alignItems(VerticalAlign.Center)
-    .padding({ left: 22, right: 22, top: 16 })
+    .padding({ left: 22, right: 22, top: this.statusBarPadding() + 16 })
     .backgroundColor(CARD_BACKGROUND)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
   }
 
   @Builder
@@ -512,8 +524,10 @@ struct Index {
         .animation({ duration: this.tabIndicatorAnimationDuration, curve: Curve.EaseInOut })
     }
     .width('100%')
-    .height(54)
+    .height(this.bottomBarHeight())
     .backgroundColor(CARD_BACKGROUND)
+    .padding({ bottom: this.navigationBarPadding() })
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.tabBarWidth = Number(newValue.width);
     })
@@ -573,6 +587,10 @@ struct Index {
     this.draftSelectedBundleNames = [];
   }
 
+  onBackPress(): boolean {
+    return false;
+  }
+
   private async loadAppSplitSettings(): Promise<void> {
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -612,7 +630,7 @@ struct Index {
     this.smartAgentEnabled = nextEnabled;
     const context = getContext(this) as common.UIAbilityContext;
     await saveSmartAgentEnabled(context, nextEnabled);
-    await this.restartVpnIfRunning('smart agent toggle');
+    await this.refreshVpnStatusForIndependentSettings('smart agent toggle');
   }
 
   private async saveAgentRuleFromPage(rule: AgentRule): Promise<void> {
@@ -639,7 +657,7 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
     this.agentRules = nextRules;
-    await this.restartVpnIfRunning('smart agent rules');
+    await this.refreshVpnStatusForIndependentSettings('smart agent rules');
   }
 
   private async deleteAgentRuleFromPage(ruleId: string): Promise<void> {
@@ -654,7 +672,7 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
     this.agentRules = nextRules;
-    await this.restartVpnIfRunning('smart agent rules');
+    await this.refreshVpnStatusForIndependentSettings('smart agent rules');
   }
 
   private async reorderAgentRuleFromPage(ruleId: string, targetIndex: number): Promise<void> {
@@ -694,7 +712,7 @@ struct Index {
     this.agentRules = nextRules;
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
-    await this.restartVpnIfRunning('smart agent rule order');
+    await this.refreshVpnStatusForIndependentSettings('smart agent rule order');
   }
 
   private async toggleDohEnabled(): Promise<void> {
@@ -705,7 +723,11 @@ struct Index {
       enabled: nextEnabled,
       provider: this.dohProvider
     });
-    await this.restartVpnIfRunning('doh toggle');
+    applyWebHttpDnsFromDohSettings({
+      enabled: nextEnabled,
+      provider: this.dohProvider
+    });
+    await this.refreshVpnStatusForIndependentSettings('doh toggle');
   }
 
   private async toggleAppSplit(): Promise<void> {
@@ -834,8 +856,16 @@ struct Index {
       return;
     }
 
-    hilog.info(DOMAIN, TAG, 'restart vpn for rule change reason=%{public}s', reason);
+    hilog.info(DOMAIN, TAG, 'restart vpn for config change reason=%{public}s', reason);
     await vpnExtension.startVpnExtensionAbility(this.buildWant());
+    this.statusText = 'Rules updated';
+  }
+
+  private async refreshVpnStatusForIndependentSettings(reason: string): Promise<void> {
+    hilog.info(DOMAIN, TAG, 'settings updated without vpn restart reason=%{public}s', reason);
+    if (this.runtimeRunning || this.vpnEnabled) {
+      await this.requestRuntimeStatusRefresh();
+    }
     this.statusText = 'Rules updated';
   }
 
@@ -1268,7 +1298,12 @@ struct Index {
         this.clearRequestedRuntimeTunnel();
       }
 
-      if (wasRunning && !running && !this.busy && this.runtimeConfirmedRunning) {
+      if (wasRunning && !running && this.shouldKeepRuntimeAliveDuringGrace(status, activeInfo)) {
+        this.vpnEnabled = true;
+        const reconnectingName = this.resolveRuntimeTunnelName(status, activeInfo.id, activeInfo.name);
+        this.statusText = reconnectingName.length > 0 ? 'Reconnecting: ' + reconnectingName : 'Reconnecting';
+        hilog.warn(DOMAIN, TAG, 'ignore transient stopped runtime during grace age=%{public}d', this.runtimeStatusAge(status));
+      } else if (wasRunning && !running && !this.busy && this.runtimeConfirmedRunning) {
         this.runtimeConfirmedRunning = false;
         await this.stopVpnContinuousTask(context, 'runtime stopped');
         this.statusText = 'Stopped';
@@ -1303,6 +1338,20 @@ struct Index {
       return false;
     }
     return true;
+  }
+
+  private shouldKeepRuntimeAliveDuringGrace(status: TunnelRuntimeStatus, activeInfo: ActiveTunnelInfo): boolean {
+    if (this.busy) {
+      return true;
+    }
+    if (!this.runtimeConfirmedRunning && !this.vpnEnabled && this.startingTunnelId.length === 0) {
+      return false;
+    }
+    if (activeInfo.configText.length === 0) {
+      return false;
+    }
+    const age = this.runtimeStatusAge(status);
+    return age >= 0 && age <= RUNTIME_STOP_GRACE_MS;
   }
 
   private runtimeStatusAge(status: TunnelRuntimeStatus): number {
@@ -1431,6 +1480,25 @@ struct Index {
     return tabWidth * this.tabIndicatorProgress + (tabWidth - 48) / 2;
   }
 
+  private statusBarPadding(): number {
+    return this.avoidAreaPaddingVp(this.topRectHeight);
+  }
+
+  private navigationBarPadding(): number {
+    return this.avoidAreaPaddingVp(this.bottomRectHeight);
+  }
+
+  private bottomBarHeight(): number {
+    return 54 + this.navigationBarPadding();
+  }
+
+  private avoidAreaPaddingVp(value: number): number {
+    if (value <= 0) {
+      return 0;
+    }
+    return this.getUIContext().px2vp(value);
+  }
+
   private async selectDohProvider(provider: string): Promise<void> {
     if (provider.length === 0 || this.dohProvider === provider) {
       return;
@@ -1441,7 +1509,11 @@ struct Index {
       enabled: this.dohEnabled,
       provider: this.dohProvider
     });
-    await this.restartVpnIfRunning('doh provider');
+    applyWebHttpDnsFromDohSettings({
+      enabled: this.dohEnabled,
+      provider: this.dohProvider
+    });
+    await this.refreshVpnStatusForIndependentSettings('doh provider');
   }
 
   private async openIssueReport(): Promise<void> {

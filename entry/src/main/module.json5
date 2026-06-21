@@ -2,6 +2,7 @@
   "module": {
     "name": "entry",
     "type": "entry",
+    "srcEntry": "./ets/entryability/EntryAbilityStage.ets",
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
     "deviceTypes": [
@@ -20,6 +21,7 @@
         "label": "$string:app_name",
         "startWindowIcon": "$media:app_start_icon",
         "startWindowBackground": "$color:start_window_background",
+        "orientation": "auto_rotation",
         "backgroundModes": [
           "dataTransfer"
         ],
@@ -33,7 +35,25 @@
               "entity.system.home"
             ]
           }
+        ],
+        "metadata": [
+          {
+            "name": "ohos.ability.shortcuts",
+            "resource": "$profile:shortcuts_config"
+          }
         ]
+      },
+      {
+        "name": "WebShortcutAbility",
+        "srcEntry": "./ets/entryability/WebShortcutAbility.ets",
+        "description": "$string:entry_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:web_shortcut_label",
+        "startWindowIcon": "$media:ic_web_shortcut_start_blank",
+        "startWindowBackground": "$color:web_shortcut_start_window_background",
+        "orientation": "auto_rotation",
+        "exported": true,
+        "launchType": "specified"
       }
     ],
     "extensionAbilities": [

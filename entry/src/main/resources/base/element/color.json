@@ -3,6 +3,10 @@
     {
       "name": "start_window_background",
       "value": "#F7F8FA"
+    },
+    {
+      "name": "web_shortcut_start_window_background",
+      "value": "#FFFFFF"
     }
   ]
 }

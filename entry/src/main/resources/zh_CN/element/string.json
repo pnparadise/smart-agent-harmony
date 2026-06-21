@@ -3,6 +3,14 @@
     {
       "name": "app_name",
       "value": "Smarty"
+    },
+    {
+      "name": "web_shortcut_label",
+      "value": "Smart Web"
+    },
+    {
+      "name": "browser_shortcut_label",
+      "value": "Browser"
     }
   ]
 }

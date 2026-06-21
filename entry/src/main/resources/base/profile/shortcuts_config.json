@@ -1,0 +1,20 @@
+{
+  "shortcuts": [
+    {
+      "shortcutId": "smart_agent_static_browser",
+      "label": "$string:browser_shortcut_label",
+      "icon": "$media:ic_browser_shortcut",
+      "wants": [
+        {
+          "bundleName": "com.smart.agent",
+          "moduleName": "entry",
+          "abilityName": "WebShortcutAbility",
+          "parameters": {
+            "webUrl": "about:smart-bookmarks",
+            "webShortcutId": "smart_agent_web_static_browser"
+          }
+        }
+      ]
+    }
+  ]
+}

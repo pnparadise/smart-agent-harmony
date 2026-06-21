@@ -50,6 +50,23 @@ export interface SplitAppInfo {
   label: string;
 }
 
+export interface WebBookmarkEntry {
+  id: string;
+  url: string;
+  title: string;
+  updatedAt: number;
+}
+
+export interface WebPwaEntry {
+  url: string;
+  startUrl: string;
+  scope: string;
+  display: string;
+  name: string;
+  manifestUrl: string;
+  updatedAt: number;
+}
+
 const STORE_NAME = 'wg_agent';
 const LOG_STORE_NAME = 'wg_agent_logs';
 const DOMAIN = 0x0001;
@@ -77,12 +94,19 @@ const SMART_AGENT_ENABLED_KEY = 'wg_smart_agent_enabled';
 const SMART_AGENT_RULES_KEY = 'wg_smart_agent_rules';
 const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
+const WEB_PINNED_URL_KEY = 'wg_web_pinned_url';
+const WEB_LAST_URL_KEY = 'wg_web_last_url';
+const WEB_SHORTCUT_URL_PREFIX = 'wg_web_shortcut_url_';
+const WEB_LAST_SHORTCUT_URL_KEY = 'wg_web_last_shortcut_url';
+const WEB_BOOKMARKS_KEY = 'wg_web_bookmarks';
+const WEB_PWA_ENTRIES_KEY = 'wg_web_pwa_entries';
 const LOG_ENTRIES_KEY = 'wg_log_entries';
 const LOG_CLEARED_AT_KEY = 'wg_log_cleared_at';
 const LAST_VPN_RESTORE_AT_KEY = 'wg_last_vpn_restore_at';
 const DATA_TRANSFER_NOTIFICATION_ID_KEY = 'wg_data_transfer_notification_id';
 const MAX_LOG_ENTRIES = 100;
 export const DEFAULT_DOH_PROVIDER = 'https://dns.alidns.com/dns-query';
+export const DEFAULT_WEB_HOME_URL = 'https://www.bing.com';
 
 export interface DohSettings {
   enabled: boolean;
@@ -449,6 +473,240 @@ export async function loadDohSettings(
   return settings;
 }
 
+export async function savePinnedWebUrl(context: StoreContext, url: string): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(WEB_PINNED_URL_KEY, normalizeWebUrlForStore(url));
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save pinned web url');
+}
+
+export async function loadPinnedWebUrl(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<string> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return normalizeWebUrlForStore(await store.get(WEB_PINNED_URL_KEY, DEFAULT_WEB_HOME_URL) as string);
+}
+
+export async function saveWebShortcutUrl(
+  context: StoreContext,
+  shortcutId: string,
+  url: string,
+  title: string = ''
+): Promise<void> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  const id = normalizeShortcutId(shortcutId);
+  const store = await getMainStoreForWrite(context);
+  await store.put(WEB_LAST_SHORTCUT_URL_KEY, normalizedUrl);
+  if (id.length > 0) {
+    await store.put(WEB_SHORTCUT_URL_PREFIX + id, normalizedUrl);
+  }
+  const bookmarkAdded = await putWebBookmark(store, {
+    id: id.length > 0 ? id : stableWebBookmarkId(normalizedUrl),
+    url: normalizedUrl,
+    title: title.trim().length > 0 ? title.trim() : webBookmarkTitle(normalizedUrl),
+    updatedAt: Date.now()
+  });
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save web shortcut url id=%{public}s bookmarkAdded=%{public}s',
+    id,
+    String(bookmarkAdded)
+  );
+}
+
+export async function saveWebShortcutMapping(
+  context: StoreContext,
+  shortcutId: string,
+  url: string
+): Promise<void> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  const id = normalizeShortcutId(shortcutId);
+  const store = await getMainStoreForWrite(context);
+  await store.put(WEB_LAST_SHORTCUT_URL_KEY, normalizedUrl);
+  if (id.length > 0) {
+    await store.put(WEB_SHORTCUT_URL_PREFIX + id, normalizedUrl);
+  }
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'save web shortcut mapping id=%{public}s', id);
+}
+
+export async function loadWebShortcutUrl(
+  context: StoreContext,
+  shortcutId: string,
+  reloadFromDisk: boolean = false
+): Promise<string> {
+  const id = normalizeShortcutId(shortcutId);
+  if (id.length === 0) {
+    return '';
+  }
+
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return normalizeWebUrlForStore(await store.get(WEB_SHORTCUT_URL_PREFIX + id, '') as string);
+}
+
+export async function hasWebShortcutMapping(
+  context: StoreContext,
+  shortcutId: string,
+  reloadFromDisk: boolean = false
+): Promise<boolean> {
+  return (await loadWebShortcutUrl(context, shortcutId, reloadFromDisk)).length > 0;
+}
+
+export async function loadLastWebShortcutUrl(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<string> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return normalizeWebUrlForStore(await store.get(WEB_LAST_SHORTCUT_URL_KEY, '') as string);
+}
+
+export async function saveWebBookmark(
+  context: StoreContext,
+  url: string,
+  title: string = '',
+  bookmarkId: string = ''
+): Promise<boolean> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  if (!isWebBookmarkUrl(normalizedUrl)) {
+    return false;
+  }
+
+  const id = normalizeShortcutId(bookmarkId);
+  const store = await getMainStoreForWrite(context);
+  if (id.length > 0) {
+    await store.put(WEB_LAST_SHORTCUT_URL_KEY, normalizedUrl);
+    await store.put(WEB_SHORTCUT_URL_PREFIX + id, normalizedUrl);
+  }
+  const added = await putWebBookmark(store, {
+    id: id.length > 0 ? id : stableWebBookmarkId(normalizedUrl),
+    url: normalizedUrl,
+    title: title.trim().length > 0 ? title.trim() : webBookmarkTitle(normalizedUrl),
+    updatedAt: Date.now()
+  });
+  if (added || id.length > 0) {
+    await store.flush();
+  }
+  hilog.info(DOMAIN, TAG, 'save web bookmark added=%{public}s', String(added));
+  return added;
+}
+
+export async function loadWebBookmarks(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<WebBookmarkEntry[]> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  return parseWebBookmarks(await store.get(WEB_BOOKMARKS_KEY, '') as string);
+}
+
+export async function saveWebPwaEntry(context: StoreContext, entry: WebPwaEntry): Promise<void> {
+  const normalized = normalizeWebPwaEntry(entry);
+  if (normalized.url.length === 0 || normalized.startUrl.length === 0 || normalized.scope.length === 0 ||
+    normalized.name.length === 0) {
+    return;
+  }
+
+  const store = await getMainStoreForWrite(context);
+  const entries = parseWebPwaEntries(await store.get(WEB_PWA_ENTRIES_KEY, '') as string);
+  const next: WebPwaEntry[] = [normalized];
+  for (let index = 0; index < entries.length; index++) {
+    const existing = entries[index];
+    if (existing.url !== normalized.url && existing.startUrl !== normalized.startUrl) {
+      next.push(existing);
+    }
+  }
+  await store.put(WEB_PWA_ENTRIES_KEY, JSON.stringify(next));
+  await store.flush();
+}
+
+export async function loadWebPwaEntry(
+  context: StoreContext,
+  url: string,
+  reloadFromDisk: boolean = false
+): Promise<WebPwaEntry | undefined> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  if (normalizedUrl.length === 0) {
+    return undefined;
+  }
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const entries = parseWebPwaEntries(await store.get(WEB_PWA_ENTRIES_KEY, '') as string);
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (entry.url === normalizedUrl || entry.startUrl === normalizedUrl ||
+      (entry.scope.length > 0 && normalizedUrl.startsWith(entry.scope))) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
+export async function deleteWebBookmark(
+  context: StoreContext,
+  bookmarkId: string,
+  url: string = ''
+): Promise<void> {
+  const id = normalizeShortcutId(bookmarkId);
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  if (id.length === 0 && normalizedUrl.length === 0) {
+    return;
+  }
+
+  const store = await getMainStoreForWrite(context);
+  const bookmarks = parseWebBookmarks(await store.get(WEB_BOOKMARKS_KEY, '') as string);
+  const next: WebBookmarkEntry[] = [];
+  for (let index = 0; index < bookmarks.length; index++) {
+    const bookmark = bookmarks[index];
+    if ((id.length > 0 && bookmark.id === id) || (normalizedUrl.length > 0 && bookmark.url === normalizedUrl)) {
+      continue;
+    }
+    next.push(bookmark);
+  }
+  await store.put(WEB_BOOKMARKS_KEY, JSON.stringify(next));
+  await store.flush();
+  hilog.info(DOMAIN, TAG, 'delete web bookmark id=%{public}s', id);
+}
+
+export async function saveLastWebUrl(context: StoreContext, url: string): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(WEB_LAST_URL_KEY, normalizeWebUrlForStore(url));
+  await store.flush();
+}
+
+export async function loadLastWebUrl(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<string> {
+  if (reloadFromDisk) {
+    await removeStoreFromCache(context);
+  }
+
+  const store = await preferences.getPreferences(context, STORE_NAME);
+  const lastUrl = normalizeWebUrlForStore(await store.get(WEB_LAST_URL_KEY, '') as string);
+  if (lastUrl.length > 0) {
+    return lastUrl;
+  }
+  return await loadPinnedWebUrl(context, false);
+}
+
 async function removeStoreFromCache(context: StoreContext): Promise<void> {
   await removePreferencesStoreFromCache(context, STORE_NAME);
 }
@@ -471,6 +729,136 @@ function normalizeDohProvider(value: string): string {
     return DEFAULT_DOH_PROVIDER;
   }
   return provider;
+}
+
+function normalizeWebUrlForStore(value: string): string {
+  return stringValue(value).trim();
+}
+
+function normalizeShortcutId(value: string): string {
+  return stringValue(value).trim();
+}
+
+function isWebBookmarkUrl(value: string): boolean {
+  const normalized = normalizeWebUrlForStore(value);
+  return normalized.startsWith('http://') || normalized.startsWith('https://');
+}
+
+async function putWebBookmark(store: preferences.Preferences, entry: WebBookmarkEntry): Promise<boolean> {
+  const normalizedUrl = normalizeWebUrlForStore(entry.url);
+  if (!isWebBookmarkUrl(normalizedUrl)) {
+    return false;
+  }
+
+  const normalizedEntry: WebBookmarkEntry = {
+    id: entry.id.length > 0 ? entry.id : stableWebBookmarkId(normalizedUrl),
+    url: normalizedUrl,
+    title: entry.title.trim().length > 0 ? entry.title.trim() : webBookmarkTitle(normalizedUrl),
+    updatedAt: entry.updatedAt > 0 ? entry.updatedAt : Date.now()
+  };
+  const bookmarks = parseWebBookmarks(await store.get(WEB_BOOKMARKS_KEY, '') as string);
+  for (let index = 0; index < bookmarks.length; index++) {
+    const bookmark = bookmarks[index];
+    if (bookmark.url === normalizedEntry.url || bookmark.id === normalizedEntry.id) {
+      return false;
+    }
+  }
+  const next: WebBookmarkEntry[] = [];
+  for (let index = 0; index < bookmarks.length; index++) {
+    next.push(bookmarks[index]);
+  }
+  next.push(normalizedEntry);
+  await store.put(WEB_BOOKMARKS_KEY, JSON.stringify(next));
+  return true;
+}
+
+function parseWebBookmarks(value: string): WebBookmarkEntry[] {
+  try {
+    const parsed = JSON.parse(value) as WebBookmarkEntry[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const result: WebBookmarkEntry[] = [];
+    for (let index = 0; index < parsed.length; index++) {
+      const item = parsed[index] as WebBookmarkEntry;
+      const url = normalizeWebUrlForStore(item.url);
+      if (url.length === 0) {
+        continue;
+      }
+      let id = normalizeShortcutId(item.id).length > 0 ? normalizeShortcutId(item.id) : stableWebBookmarkId(url);
+      for (let resultIndex = 0; resultIndex < result.length; resultIndex++) {
+        if (result[resultIndex].id === id && result[resultIndex].url !== url) {
+          id = stableWebBookmarkId(url);
+          break;
+        }
+      }
+      result.push({
+        id: id,
+        url: url,
+        title: stringValue(item.title).trim().length > 0 ? stringValue(item.title).trim() : webBookmarkTitle(url),
+        updatedAt: typeof item.updatedAt === 'number' && !isNaN(item.updatedAt) ? item.updatedAt : 0
+      });
+    }
+    return result;
+  } catch (err) {
+    return [];
+  }
+}
+
+function normalizeWebPwaEntry(entry: WebPwaEntry): WebPwaEntry {
+  return {
+    url: normalizeWebUrlForStore(entry.url),
+    startUrl: normalizeWebUrlForStore(entry.startUrl),
+    scope: normalizeWebUrlForStore(entry.scope),
+    display: stringValue(entry.display).trim().toLowerCase(),
+    name: stringValue(entry.name).trim(),
+    manifestUrl: normalizeWebUrlForStore(entry.manifestUrl),
+    updatedAt: typeof entry.updatedAt === 'number' && !isNaN(entry.updatedAt) && entry.updatedAt > 0 ?
+      entry.updatedAt : Date.now()
+  };
+}
+
+function parseWebPwaEntries(value: string): WebPwaEntry[] {
+  try {
+    const parsed = JSON.parse(value) as WebPwaEntry[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const result: WebPwaEntry[] = [];
+    for (let index = 0; index < parsed.length; index++) {
+      const entry = normalizeWebPwaEntry(parsed[index] as WebPwaEntry);
+      if (entry.url.length === 0 || entry.startUrl.length === 0 || entry.scope.length === 0 ||
+        entry.name.length === 0) {
+        continue;
+      }
+      result.push(entry);
+    }
+    return result;
+  } catch (err) {
+    return [];
+  }
+}
+
+function webBookmarkTitle(url: string): string {
+  const marker = '://';
+  const schemeIndex = url.indexOf(marker);
+  if (schemeIndex < 0) {
+    return url;
+  }
+  const start = schemeIndex + marker.length;
+  const slashIndex = url.indexOf('/', start);
+  const host = slashIndex >= 0 ? url.substring(start, slashIndex) : url.substring(start);
+  const atIndex = host.lastIndexOf('@');
+  return atIndex >= 0 ? host.substring(atIndex + 1) : host;
+}
+
+function stableWebBookmarkId(url: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < url.length; index++) {
+    hash ^= url.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 'web_' + (hash >>> 0).toString(16);
 }
 
 export function createTunnelId(): string {
