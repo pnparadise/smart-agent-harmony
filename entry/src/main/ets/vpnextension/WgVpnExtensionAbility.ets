@@ -1,19 +1,26 @@
 import { common, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { buffer } from '@kit.ArkTS';
 import { connection, vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
+import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   ActiveTunnelInfo,
   appendAgentLog,
+  buildSmartAgentSwitchLogEntry,
   buildVpnRestartLogEntry,
+  DEFAULT_DOH_PROVIDER,
   loadAppSplitEnabled,
   loadActiveTunnelInfo,
   loadConfig,
+  loadDohSettings,
   loadSelectedSplitApps,
+  loadSmartAgentEnabled,
   saveTunnelRuntimeStatus,
   SplitAppInfo,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
+import { SmartAgentDecision, SmartAgentStrategy } from '../wireguard/SmartAgentStrategy';
 import {
   hasIPv4,
   hasIPv6,
@@ -30,9 +37,19 @@ const TAG = 'WgVpnExtension';
 const VPN_INTERFACE = 'vpn-tun';
 const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
-const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 30000;
-const WANT_ACTION_REFRESH_STATUS = 'refreshStatus';
+const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 5000;
+const RUNTIME_STATUS_PUBLISH_INTERVAL_MS = 3000;
 const WANT_ACTION_RESTORE = 'restore';
+const DOH_RESOLVE_TIMEOUT_MS = 8000;
+
+interface DnsJsonAnswer {
+  data?: string;
+  type?: number;
+}
+
+interface DnsJsonResponse {
+  Answer?: DnsJsonAnswer[];
+}
 
 interface LoggedVpnConfig extends vpnExtension.VpnConfig {
   trustedApplications?: string[];
@@ -43,6 +60,8 @@ interface DesiredVpnState {
   activeInfo: ActiveTunnelInfo;
   appSplitEnabled: boolean;
   selectedSplitApps: SplitAppInfo[];
+  smartAgentEnabled: boolean;
+  decisionSummary: string;
   fingerprint: string;
 }
 
@@ -56,21 +75,16 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private restartQueue: Promise<void> = Promise.resolve();
   private lastForceHandshakeAt: number = 0;
   private dataTransferNotificationTimer: number = -1;
+  private runtimeStatusPublishTimer: number = -1;
   private lastNotifiedTxBytes: number = -1;
   private lastNotifiedRxBytes: number = -1;
   private lastLoggedTunReadPackets: number = -1;
   private lastLoggedTunDroppedPackets: number = -1;
   private lastLoggedUdpReadPackets: number = -1;
+  private networkStrategyInFlight: boolean = false;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
-    if (this.isRefreshStatusWant(want)) {
-      this.restoreOrPublishColdStatus().catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'handle cold refresh status failed: %{public}s', this.formatError(err));
-      });
-      return;
-    }
-
     this.restartWireGuard('onCreate', false).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'start failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
@@ -79,33 +93,8 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
-  private async restoreOrPublishColdStatus(): Promise<void> {
-    const activeInfo = await loadActiveTunnelInfo(this.context as common.VpnExtensionContext, true);
-    if (activeInfo.configText.length === 0) {
-      hilog.info(DOMAIN, TAG, 'cold refresh status, no active tunnel');
-      await this.publishRuntimeStatus(false, false);
-      return;
-    }
-
-    hilog.warn(
-      DOMAIN,
-      TAG,
-      'cold refresh status with active tunnel, restoring id=%{public}s name=%{public}s',
-      activeInfo.id,
-      activeInfo.name
-    );
-    await this.restartWireGuard('coldRefreshStatusRestore', false);
-  }
-
   onRequest(want: Want, startId: number): void {
     hilog.info(DOMAIN, TAG, 'onRequest startId=%{public}d ability=%{public}s', startId, want.abilityName ?? '');
-    if (this.isRefreshStatusWant(want)) {
-      this.publishRuntimeStatus(this.tunnelHandle !== 0, true).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'publish requested runtime status failed: %{public}s', this.formatError(err));
-      });
-      return;
-    }
-
     if (this.isRestoreWant(want) && this.tunnelHandle !== 0) {
       this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish restore status failed: %{public}s', this.formatError(err));
@@ -128,9 +117,13 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
-  private async restartWireGuard(reason: string, cleanupFirst: boolean): Promise<void> {
+  private async restartWireGuard(
+    reason: string,
+    cleanupFirst: boolean,
+    desiredState?: DesiredVpnState
+  ): Promise<void> {
     const task = this.restartQueue.then(() => {
-      return this.doRestartWireGuard(reason, cleanupFirst);
+      return this.doRestartWireGuard(reason, cleanupFirst, desiredState);
     });
     this.restartQueue = task.catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restart queue task failed: %{public}s', this.formatError(err));
@@ -138,8 +131,12 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     await task;
   }
 
-  private async doRestartWireGuard(reason: string, cleanupFirst: boolean): Promise<void> {
-    const desiredState = await this.resolveDesiredVpnState();
+  private async doRestartWireGuard(
+    reason: string,
+    cleanupFirst: boolean,
+    desiredState?: DesiredVpnState
+  ): Promise<void> {
+    const effectiveDesiredState = desiredState === undefined ? await this.resolveDesiredVpnState() : desiredState;
     hilog.info(
       DOMAIN,
       TAG,
@@ -148,11 +145,11 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       String(cleanupFirst),
       this.tunnelHandle,
       this.activeTunnelId,
-      desiredState.activeInfo.id
+      effectiveDesiredState.activeInfo.id
     );
-    if (this.canReuseRunningTunnel(desiredState)) {
-      this.activeTunnelId = desiredState.activeInfo.id;
-      this.activeTunnelName = desiredState.activeInfo.name;
+    if (this.canReuseRunningTunnel(effectiveDesiredState)) {
+      this.activeTunnelId = effectiveDesiredState.activeInfo.id;
+      this.activeTunnelName = effectiveDesiredState.activeInfo.name;
       hilog.info(DOMAIN, TAG, 'skip restart, running vpn config unchanged reason=%{public}s', reason);
       await this.publishRuntimeStatus(true, true);
       return;
@@ -160,7 +157,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     if (cleanupFirst || this.tunnelHandle !== 0 || this.vpnConnection !== undefined) {
       await this.cleanup(false);
     }
-    await this.startWireGuard(desiredState);
+    await this.startWireGuard(effectiveDesiredState);
   }
 
   private async startWireGuard(desiredState?: DesiredVpnState): Promise<void> {
@@ -178,6 +175,19 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       this.activeTunnelName,
       activeInfo.configText.length
     );
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'desired state smartAgentEnabled=%{public}s decision=%{public}s',
+      String(desired.smartAgentEnabled),
+      desired.decisionSummary
+    );
+    if (activeInfo.configText.length === 0) {
+      hilog.info(DOMAIN, TAG, 'skip tunnel start, no active config after strategy decision');
+      this.startNetworkObserver();
+      await this.publishRuntimeStatus(false, false);
+      return;
+    }
 
     const rawConfig = activeInfo.configText;
     hilog.info(DOMAIN, TAG, 'config resolved, bytes=%{public}d', rawConfig.length);
@@ -255,6 +265,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
       this.startDataTransferNotificationUpdates();
+      this.startRuntimeStatusPublishUpdates();
       this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
@@ -276,6 +287,18 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
+  private appendSmartAgentSwitchLog(trigger: string, fromTunnelName: string, toTunnelName: string): void {
+    if (fromTunnelName.trim() === toTunnelName.trim()) {
+      return;
+    }
+    appendAgentLog(
+      this.context as common.VpnExtensionContext,
+      buildSmartAgentSwitchLogEntry(trigger, fromTunnelName, toTunnelName, Date.now())
+    ).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'append smart agent switch log failed: %{public}s', this.formatError(err));
+    });
+  }
+
   private async resolveDesiredVpnState(): Promise<DesiredVpnState> {
     const activeInfo = await this.resolveActiveTunnelInfo();
     const appSplitEnabled = await loadAppSplitEnabled(this.context as common.VpnExtensionContext, true);
@@ -284,7 +307,22 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       activeInfo: activeInfo,
       appSplitEnabled: appSplitEnabled,
       selectedSplitApps: selectedSplitApps,
+      smartAgentEnabled: false,
+      decisionSummary: 'manual active tunnel',
       fingerprint: this.buildVpnStateFingerprint(activeInfo, appSplitEnabled, selectedSplitApps)
+    };
+  }
+
+  private async resolveDesiredVpnStateForDecision(decision: SmartAgentDecision): Promise<DesiredVpnState> {
+    const appSplitEnabled = await loadAppSplitEnabled(this.context as common.VpnExtensionContext, true);
+    const selectedSplitApps = await loadSelectedSplitApps(this.context as common.VpnExtensionContext, true);
+    return {
+      activeInfo: decision.selectedActiveInfo,
+      appSplitEnabled: appSplitEnabled,
+      selectedSplitApps: selectedSplitApps,
+      smartAgentEnabled: true,
+      decisionSummary: decision.summary,
+      fingerprint: this.buildVpnStateFingerprint(decision.selectedActiveInfo, appSplitEnabled, selectedSplitApps)
     };
   }
 
@@ -330,7 +368,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   private async resolveConfigText(): Promise<string> {
     hilog.info(DOMAIN, TAG, 'using config from preferences');
-    return await loadConfig(this.context as common.VpnExtensionContext);
+    return await loadConfig(this.context as common.VpnExtensionContext, true);
   }
 
   private async resolveActiveTunnelInfo(): Promise<ActiveTunnelInfo> {
@@ -350,10 +388,20 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     return fallbackInfo;
   }
 
+  private async resolveSmartAgentDecision(): Promise<SmartAgentDecision> {
+    const strategy = new SmartAgentStrategy(this.context as common.VpnExtensionContext);
+    return await strategy.resolveDecision();
+  }
+
   private async resolveEndpointHost(host: string): Promise<string> {
     const normalized = host.trim();
     if (this.isIpAddress(normalized)) {
       return normalized;
+    }
+
+    const dohResolved = await this.resolveEndpointHostViaDoh(normalized);
+    if (dohResolved.length > 0) {
+      return dohResolved;
     }
 
     const addresses = await connection.getAddressesByName(normalized);
@@ -368,6 +416,87 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       }
     }
     return addresses[0].address;
+  }
+
+  private async resolveEndpointHostViaDoh(host: string): Promise<string> {
+    const settings = await loadDohSettings(this.context as common.VpnExtensionContext, true);
+    if (!settings.enabled) {
+      return '';
+    }
+
+    const provider = this.normalizeDohProvider(settings.provider);
+    if (provider.length === 0) {
+      return '';
+    }
+
+    const ipv4 = await this.queryDohAddress(provider, host, 'A');
+    if (ipv4.length > 0) {
+      hilog.info(DOMAIN, TAG, 'endpoint doh resolved host=%{public}s type=A value=%{public}s', host, ipv4);
+      return ipv4;
+    }
+
+    const ipv6 = await this.queryDohAddress(provider, host, 'AAAA');
+    if (ipv6.length > 0) {
+      hilog.info(DOMAIN, TAG, 'endpoint doh resolved host=%{public}s type=AAAA value=%{public}s', host, ipv6);
+      return ipv6;
+    }
+
+    return '';
+  }
+
+  private async queryDohAddress(provider: string, host: string, recordType: string): Promise<string> {
+    const request = http.createHttp();
+    const requestUrl = provider + '?name=' + encodeURIComponent(host) + '&type=' + encodeURIComponent(recordType);
+    try {
+      const options: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        usingCache: true,
+        readTimeout: DOH_RESOLVE_TIMEOUT_MS,
+        connectTimeout: DOH_RESOLVE_TIMEOUT_MS,
+        header: {
+          Accept: 'application/dns-json, application/json, text/plain, */*'
+        }
+      };
+      const response = await request.request(requestUrl, options);
+      if (response.responseCode < http.ResponseCode.OK || response.responseCode >= 300 ||
+        response.resultType !== http.HttpDataType.ARRAY_BUFFER) {
+        return '';
+      }
+      const text = buffer.from(new Uint8Array(response.result as ArrayBuffer)).toString('utf8');
+      const payload = JSON.parse(text) as DnsJsonResponse;
+      if (!Array.isArray(payload.Answer)) {
+        return '';
+      }
+      for (let index = 0; index < payload.Answer.length; index++) {
+        const answer = payload.Answer[index];
+        if (answer === undefined || answer.data === undefined || answer.type === undefined) {
+          continue;
+        }
+        if ((recordType === 'A' && answer.type === 1) || (recordType === 'AAAA' && answer.type === 28)) {
+          const value = answer.data.trim();
+          if (value.length > 0) {
+            return value;
+          }
+        }
+      }
+      return '';
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'endpoint doh query failed host=%{public}s type=%{public}s error=%{public}s',
+        host, recordType, this.formatError(error));
+      return '';
+    } finally {
+      request.destroy();
+    }
+  }
+
+  private normalizeDohProvider(value: string): string {
+    const provider = value.trim();
+    if (provider.length === 0) {
+      return DEFAULT_DOH_PROVIDER;
+    }
+    return provider;
   }
 
   private isIpAddress(value: string): boolean {
@@ -564,6 +693,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     );
     this.stopNetworkObserver();
     this.stopDataTransferNotificationUpdates();
+    this.stopRuntimeStatusPublishUpdates();
     this.lastForceHandshakeAt = 0;
     this.runningConfigFingerprint = '';
 
@@ -612,6 +742,22 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.resetDataTransferNotificationState();
   }
 
+  private startRuntimeStatusPublishUpdates(): void {
+    this.stopRuntimeStatusPublishUpdates();
+    this.runtimeStatusPublishTimer = setInterval(() => {
+      this.publishRuntimeStatus(this.tunnelHandle !== 0, true).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'periodic runtime status publish failed: %{public}s', this.formatError(err));
+      });
+    }, RUNTIME_STATUS_PUBLISH_INTERVAL_MS);
+  }
+
+  private stopRuntimeStatusPublishUpdates(): void {
+    if (this.runtimeStatusPublishTimer >= 0) {
+      clearInterval(this.runtimeStatusPublishTimer);
+      this.runtimeStatusPublishTimer = -1;
+    }
+  }
+
   private async updateDataTransferNotification(): Promise<void> {
     if (this.tunnelHandle === 0) {
       return;
@@ -621,10 +767,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.logNativePacketStats(stats);
     const txBytes = stats.txBytes;
     const rxBytes = stats.rxBytes;
-    if (txBytes === this.lastNotifiedTxBytes && rxBytes === this.lastNotifiedRxBytes) {
-      return;
-    }
-
     this.lastNotifiedTxBytes = txBytes;
     this.lastNotifiedRxBytes = rxBytes;
     await updateVpnDataTransferNotification(
@@ -643,13 +785,20 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     try {
       const netConnection = connection.createNetConnection();
       netConnection.on('netAvailable', (netHandle: connection.NetHandle) => {
-        this.handleNetworkChanged('netAvailable', netHandle);
+        this.handleNetworkChanged('netAvailable', netHandle).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'handle netAvailable failed: %{public}s', this.formatError(err));
+        });
       });
       netConnection.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo) => {
-        this.handleNetworkChanged('netCapabilitiesChange', info.netHandle);
+        this.handleNetworkChanged('netCapabilitiesChange', info.netHandle).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'handle netCapabilitiesChange failed: %{public}s', this.formatError(err));
+        });
       });
       netConnection.on('netLost', (netHandle: connection.NetHandle) => {
         hilog.info(DOMAIN, TAG, 'network lost netId=%{public}d', netHandle.netId);
+        this.handleNetworkChanged('netLost', netHandle).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'handle netLost failed: %{public}s', this.formatError(err));
+        });
       });
       netConnection.register((err: BusinessError) => {
         if (err !== undefined && err.code !== 0) {
@@ -685,9 +834,92 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
-  private handleNetworkChanged(reason: string, netHandle: connection.NetHandle): void {
+  private async handleNetworkChanged(reason: string, netHandle: connection.NetHandle): Promise<void> {
     hilog.info(DOMAIN, TAG, 'network changed reason=%{public}s netId=%{public}d', reason, netHandle.netId);
-    this.forceHandshake(reason);
+    const smartAgentEnabled = await loadSmartAgentEnabled(this.context as common.VpnExtensionContext, true);
+    if (!smartAgentEnabled) {
+      this.forceHandshake(reason);
+      return;
+    }
+    const decision = await this.resolveSmartAgentDecision();
+    await this.applySmartAgentDecision(reason, decision);
+  }
+
+  private async applySmartAgentDecision(reason: string, decision: SmartAgentDecision): Promise<void> {
+    if (this.networkStrategyInFlight) {
+      hilog.info(DOMAIN, TAG, 'skip smart agent reevaluate while in flight reason=%{public}s', reason);
+      return;
+    }
+
+    this.networkStrategyInFlight = true;
+    try {
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'smart agent decision reason=%{public}s mode=%{public}s summary=%{public}s selectedId=%{public}s handle=%{public}d',
+        reason,
+        decision.matchSource,
+        decision.summary,
+        decision.selectedActiveInfo.id,
+        this.tunnelHandle
+      );
+
+      if (!decision.shouldConnectVpn) {
+        if (this.tunnelHandle !== 0 || this.vpnConnection !== undefined) {
+          this.appendSmartAgentSwitchLog(reason, this.activeTunnelName, '');
+          await this.cleanupTunnelOnly();
+        } else {
+          await this.publishRuntimeStatus(false, false);
+        }
+        return;
+      }
+
+      const desiredState = await this.resolveDesiredVpnStateForDecision(decision);
+      if (this.canReuseRunningTunnel(desiredState)) {
+        this.activeTunnelId = desiredState.activeInfo.id;
+        this.activeTunnelName = desiredState.activeInfo.name;
+        this.forceHandshake(reason);
+        await this.publishRuntimeStatus(true, true);
+        return;
+      }
+
+      this.appendSmartAgentSwitchLog(reason, this.activeTunnelName, desiredState.activeInfo.name);
+      await this.restartWireGuard('network:' + reason, true, desiredState);
+    } finally {
+      this.networkStrategyInFlight = false;
+    }
+  }
+
+  private async cleanupTunnelOnly(): Promise<void> {
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'cleanup tunnel only begin handle=%{public}d hasConnection=%{public}s',
+      this.tunnelHandle,
+      String(this.vpnConnection !== undefined)
+    );
+    this.stopDataTransferNotificationUpdates();
+    this.stopRuntimeStatusPublishUpdates();
+    this.lastForceHandshakeAt = 0;
+    this.runningConfigFingerprint = '';
+    this.activeTunnelId = '';
+    this.activeTunnelName = '';
+
+    if (this.tunnelHandle !== 0) {
+      NativeTunnel.stop(this.tunnelHandle);
+      this.tunnelHandle = 0;
+    }
+
+    if (this.vpnConnection !== undefined) {
+      const connectionToDestroy = this.vpnConnection;
+      this.vpnConnection = undefined;
+      await connectionToDestroy.destroy().catch((err: BusinessError) => {
+        hilog.error(DOMAIN, TAG, 'destroy in cleanupTunnelOnly failed: %{public}s', this.formatError(err));
+      });
+    }
+
+    await this.publishRuntimeStatus(false, false);
+    hilog.info(DOMAIN, TAG, 'cleanup tunnel only end');
   }
 
   private forceHandshake(reason: string): void {
@@ -711,6 +943,16 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async publishRuntimeStatus(running: boolean, includeStats: boolean): Promise<void> {
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'publishRuntimeStatus begin running=%{public}s includeStats=%{public}s activeId=%{public}s activeName=%{public}s handle=%{public}d',
+      String(running),
+      String(includeStats),
+      this.activeTunnelId,
+      this.activeTunnelName,
+      this.tunnelHandle
+    );
     let txBytes = 0;
     let rxBytes = 0;
     let latestHandshakeSeconds = -1;
@@ -757,6 +999,17 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       rttMillis: rttMillis,
       updatedAt: Date.now()
     };
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'publishRuntimeStatus save running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
+      String(status.running),
+      status.tunnelId,
+      status.tunnelName,
+      status.txBytes,
+      status.rxBytes,
+      status.updatedAt
+    );
     await saveTunnelRuntimeStatus(this.context as common.VpnExtensionContext, status);
   }
 
@@ -780,10 +1033,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       stats.tunReadLast,
       stats.tunWriteLast
     );
-  }
-
-  private isRefreshStatusWant(want: Want): boolean {
-    return this.wantAction(want) === WANT_ACTION_REFRESH_STATUS;
   }
 
   private isRestoreWant(want: Want): boolean {

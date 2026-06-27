@@ -11,6 +11,7 @@ import {
 } from '../wireguard/ConfigStore';
 import { syncWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
 import { activateImmersiveWindow, configureImmersiveWindow } from './ImmersiveWindow';
+import { notifyWebBrowserBackgroundForPictureInPicture } from './WebBrowserPictureInPictureEvents';
 import { setCurrentWebShortcut } from './WebShortcutState';
 import { WEB_SHORTCUT_CLOSE_EVENT } from './WebShortcutCloseEvents';
 
@@ -81,6 +82,11 @@ export default class WebShortcutAbility extends UIAbility {
   onForeground(): void {
     hilog.info(DOMAIN, TAG, 'onForeground');
     this.activateWindow();
+  }
+
+  onBackground(): void {
+    hilog.info(DOMAIN, TAG, 'onBackground');
+    notifyWebBrowserBackgroundForPictureInPicture();
   }
 
   onWindowStageDestroy(): void {

@@ -36,6 +36,8 @@ export struct RulesPage {
   @Prop tunnels: TunnelConfig[] = [];
   @Prop dohEnabled: boolean = true;
   @Prop dohProvider: string = '';
+  @Prop browserDohEnabled: boolean = true;
+  @Prop browserDohProvider: string = '';
   @Prop selectedSplitAppCount: number = 0;
   @State private editingAgentRuleId: string = '';
   @State private draftAgentRuleType: AgentRuleType = 'wifiGateway';
@@ -50,18 +52,22 @@ export struct RulesPage {
   @State private suppressAgentRuleCardClick: boolean = false;
   @State private agentRuleDropdown: string = AGENT_RULE_DROPDOWN_NONE;
   @State private dohDropdownExpanded: boolean = false;
+  @State private browserDohDropdownExpanded: boolean = false;
   private suppressAgentRuleCardClickToken: number = 0;
   private agentRuleDropCommitted: boolean = false;
   private agentRuleDragSequence: number = 0;
   private agentRuleDragStartIndex: number = -1;
   private agentRuleDragLastTargetIndex: number = -1;
+  private agentRuleSaveRequestToken: number = 0;
   onToggleAppSplit: () => void = () => {};
   onToggleSmartAgent: () => void = () => {};
-  onSaveAgentRule: (rule: AgentRule) => void = () => {};
+  onSaveAgentRule: (rule: AgentRule) => Promise<void> = () => Promise.resolve();
   onDeleteAgentRule: (ruleId: string) => void = () => {};
   onReorderAgentRule: (ruleId: string, targetIndex: number) => void = () => {};
   onToggleDoh: () => void = () => {};
   onSelectDohProvider: (provider: string) => void = () => {};
+  onToggleBrowserDoh: () => void = () => {};
+  onSelectBrowserDohProvider: (provider: string) => void = () => {};
   onOpenAppPicker: () => void = () => {};
   onOpenIssueReport: () => void = () => {};
 
@@ -74,6 +80,7 @@ export struct RulesPage {
           this.buildAgentRuleList();
         }
         this.buildDohCard();
+        this.buildBrowserDohCard();
         this.buildNavigationRuleCard('Github Issue Report', '前往Github 反馈问题');
 
         Blank()
@@ -194,7 +201,7 @@ export struct RulesPage {
     Column() {
       ForEach(this.displayedAgentRules(), (rule: AgentRule) => {
         this.buildAgentRuleCard(rule);
-      }, (rule: AgentRule) => rule.id)
+      }, (rule: AgentRule) => this.agentRuleRenderKey(rule))
 
       if (this.editingAgentRuleId === CREATE_AGENT_RULE_ID) {
         this.buildAgentRuleFormCard(true);
@@ -320,6 +327,17 @@ export struct RulesPage {
         return;
       }
       hilog.info(DOMAIN, TAG, 'agent card click open ruleId=%{public}s', rule.id);
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent card snapshot rule=%{public}s type=%{public}s match=%{public}s targetId=%{public}s targetName=%{public}s enabled=%{public}s',
+        rule.id,
+        rule.type,
+        this.describeMatchValue(rule.matchValue),
+        rule.targetTunnelId,
+        rule.targetTunnelName,
+        String(rule.enabled)
+      );
       this.openAgentRuleEditor(rule);
     })
   }
@@ -448,7 +466,7 @@ export struct RulesPage {
               .maxLines(1)
               .margin({ left: 10, bottom: 6 })
             TextInput({
-              text: this.draftAgentRuleMatchValue,
+              text: $$this.draftAgentRuleMatchValue,
               placeholder: this.agentRuleMatchPlaceholder(this.draftAgentRuleType)
             })
               .width('100%')
@@ -459,6 +477,15 @@ export struct RulesPage {
               .padding({ left: 14, right: 14 })
               .border({ width: 1, color: '#E4E7EC', radius: 10 })
               .onChange((value: string) => {
+                hilog.info(
+                  DOMAIN,
+                  TAG,
+                  'agent match input change edit=%{public}s type=%{public}s from=%{public}s to=%{public}s',
+                  this.editingAgentRuleId,
+                  this.draftAgentRuleType,
+                  this.describeMatchValue(this.draftAgentRuleMatchValue),
+                  this.describeMatchValue(value)
+                );
                 this.draftAgentRuleMatchValue = value;
                 this.agentRuleNotice = '';
               })
@@ -467,7 +494,7 @@ export struct RulesPage {
           .alignItems(HorizontalAlign.Start)
 
           Button() {
-            Image($r('app.media.ic_wifi_blue'))
+            Image($r('app.media.ic_wifi_gray'))
               .width(24)
               .height(24)
           }
@@ -538,7 +565,7 @@ export struct RulesPage {
           .backgroundColor(PRIMARY_BLUE)
           .borderRadius(12)
           .onClick(() => {
-            this.saveEditingAgentRule();
+            this.queueSaveEditingAgentRule();
           })
       }
       .width('100%')
@@ -621,7 +648,7 @@ export struct RulesPage {
   @Builder
   private buildAgentRuleIcon(ruleType: AgentRuleType) {
     if (ruleType === 'wifiGateway' || ruleType === 'wifiSsid') {
-      Image($r('app.media.ic_wifi_blue'))
+      Image($r('app.media.ic_wifi_gray'))
         .width(32)
         .height(32)
     } else {
@@ -641,7 +668,7 @@ export struct RulesPage {
             .fontWeight(FontWeight.Bold)
             .fontColor(TEXT_PRIMARY)
             .maxLines(1)
-          Text('通过 DoH 解析隧道域名')
+          Text('通过 DoH 解析隧道 endpoint 域名')
             .fontSize(13)
             .fontColor(TEXT_SECONDARY)
             .margin({ top: 10 })
@@ -663,7 +690,7 @@ export struct RulesPage {
         .color(DIVIDER_COLOR)
         .margin({ top: 22, bottom: 20 })
 
-      this.buildDohProviderEditor();
+      this.buildDohProviderEditor(false);
     }
     .width('100%')
     .padding({ left: 22, right: 22, top: 24, bottom: 24 })
@@ -675,7 +702,50 @@ export struct RulesPage {
   }
 
   @Builder
-  private buildDohProviderEditor() {
+  private buildBrowserDohCard() {
+    Column() {
+      Row() {
+        Column() {
+          Text('Browser DoH DNS')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(TEXT_PRIMARY)
+            .maxLines(1)
+          Text('通过 DoH 接管内置浏览器 DNS')
+            .fontSize(13)
+            .fontColor(TEXT_SECONDARY)
+            .margin({ top: 10 })
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Row() {
+          this.buildRuleSwitchFace('browserDoh');
+        }
+        .onClick(() => {
+          this.onToggleBrowserDoh();
+        })
+      }
+      .width('100%')
+
+      Divider()
+        .strokeWidth(1)
+        .color(DIVIDER_COLOR)
+        .margin({ top: 22, bottom: 20 })
+
+      this.buildDohProviderEditor(true);
+    }
+    .width('100%')
+    .padding({ left: 22, right: 22, top: 24, bottom: 24 })
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(CARD_RADIUS)
+    .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
+    .margin({ bottom: 18 })
+    .zIndex(this.browserDohDropdownExpanded ? 110 : 1)
+  }
+
+  @Builder
+  private buildDohProviderEditor(browserDoh: boolean) {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
         Text(DOH_PREFIX)
@@ -683,7 +753,7 @@ export struct RulesPage {
           .fontColor('#7B7F86')
           .maxLines(1)
         TextInput({
-          text: this.dohEditableValue(),
+          text: this.dohEditableValue(browserDoh),
           placeholder: 'dns.alidns.com'
         })
           .layoutWeight(1)
@@ -694,7 +764,7 @@ export struct RulesPage {
           .padding({ left: 0, right: 0 })
           .borderWidth(0)
           .onChange((value: string) => {
-            this.changeDohProviderInput(value);
+            this.changeDohProviderInput(browserDoh, value);
           })
         Text(DOH_SUFFIX)
           .fontSize(14)
@@ -709,23 +779,23 @@ export struct RulesPage {
         Image($r('app.media.ic_chevron_down_gray'))
           .width(22)
           .height(22)
-          .rotate({ angle: this.dohDropdownExpanded ? 180 : 0 })
+          .rotate({ angle: this.isDohDropdownExpanded(browserDoh) ? 180 : 0 })
           .onClick(() => {
-            this.toggleDohDropdown();
+            this.toggleDohDropdown(browserDoh);
           })
       }
       .width('100%')
       .height(52)
       .padding({ left: 14, right: 12 })
       .alignItems(VerticalAlign.Center)
-      .border({ width: 1, color: this.dohDropdownExpanded ? PRIMARY_BLUE : '#E4E7EC', radius: 10 })
-      .backgroundColor(this.dohDropdownExpanded ? '#F8FBFF' : CARD_BACKGROUND)
+      .border({ width: 1, color: this.isDohDropdownExpanded(browserDoh) ? PRIMARY_BLUE : '#E4E7EC', radius: 10 })
+      .backgroundColor(this.isDohDropdownExpanded(browserDoh) ? '#F8FBFF' : CARD_BACKGROUND)
 
-      if (this.dohDropdownExpanded) {
+      if (this.isDohDropdownExpanded(browserDoh)) {
         Row() {
           Blank()
             .layoutWeight(1)
-          this.buildDohProviderMenu();
+          this.buildDohProviderMenu(browserDoh);
         }
         .width('100%')
         .height(208)
@@ -740,7 +810,7 @@ export struct RulesPage {
   }
 
   @Builder
-  private buildDohProviderMenu() {
+  private buildDohProviderMenu(browserDoh: boolean) {
     Scroll() {
       Column() {
         ForEach(this.dohProviderOptions(), (option: FloatingSelectOption) => {
@@ -750,7 +820,7 @@ export struct RulesPage {
               .fontColor(TEXT_PRIMARY)
               .maxLines(1)
               .layoutWeight(1)
-            if (this.dohEditableValue() === option.value) {
+            if (this.dohEditableValue(browserDoh) === option.value) {
               Image($r('app.media.ic_check_blue'))
                 .width(20)
                 .height(20)
@@ -763,7 +833,7 @@ export struct RulesPage {
           .alignItems(VerticalAlign.Center)
           .backgroundColor(CARD_BACKGROUND)
           .onClick(() => {
-            this.selectDohProvider(this.buildDohProviderFromEditable(option.value));
+            this.selectDohProvider(browserDoh, this.buildDohProviderFromEditable(option.value));
           })
         }, (option: FloatingSelectOption) => option.value)
       }
@@ -870,6 +940,16 @@ export struct RulesPage {
       this.agentRuleNotice = '';
       this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
       this.dohDropdownExpanded = false;
+      this.browserDohDropdownExpanded = false;
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent open create editor edit=%{public}s type=%{public}s match=%{public}s target=%{public}s',
+        this.editingAgentRuleId,
+        this.draftAgentRuleType,
+        this.describeMatchValue(this.draftAgentRuleMatchValue),
+        this.draftAgentRuleTargetTunnelId
+      );
     });
   }
 
@@ -884,6 +964,17 @@ export struct RulesPage {
       this.agentRuleNotice = '';
       this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
       this.dohDropdownExpanded = false;
+      this.browserDohDropdownExpanded = false;
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent open editor rule=%{public}s type=%{public}s match=%{public}s target=%{public}s enabled=%{public}s',
+        rule.id,
+        rule.type,
+        this.describeMatchValue(this.draftAgentRuleMatchValue),
+        rule.targetTunnelId,
+        String(rule.enabled)
+      );
     });
   }
 
@@ -894,6 +985,17 @@ export struct RulesPage {
   }
 
   private saveEditingAgentRule(): void {
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent save click edit=%{public}s type=%{public}s needsMatch=%{public}s draftMatch=%{public}s target=%{public}s enabled=%{public}s',
+      this.editingAgentRuleId,
+      this.draftAgentRuleType,
+      String(this.agentRuleNeedsMatch(this.draftAgentRuleType)),
+      this.describeMatchValue(this.draftAgentRuleMatchValue),
+      this.draftAgentRuleTargetTunnelId,
+      String(this.draftAgentRuleEnabled)
+    );
     if (this.editingAgentRuleId.length === 0) {
       return;
     }
@@ -910,8 +1012,59 @@ export struct RulesPage {
       targetTunnelName: this.draftTargetTunnelLabel(),
       enabled: this.draftAgentRuleEnabled
     };
-    this.onSaveAgentRule(rule);
-    this.cancelAgentRuleEdit();
+    this.onSaveAgentRule(rule)
+      .then(() => {
+        this.cancelAgentRuleEdit();
+      })
+      .catch(() => {
+        this.agentRuleNotice = '保存失败，请重试';
+      });
+  }
+
+  private queueSaveEditingAgentRule(): void {
+    const queuedEditId = this.editingAgentRuleId;
+    const requestToken = ++this.agentRuleSaveRequestToken;
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent save queued token=%{public}d edit=%{public}s match=%{public}s',
+      requestToken,
+      queuedEditId,
+      this.describeMatchValue(this.draftAgentRuleMatchValue)
+    );
+    setTimeout(() => {
+      if (requestToken !== this.agentRuleSaveRequestToken) {
+        hilog.info(
+          DOMAIN,
+          TAG,
+          'agent save queue skip stale token=%{public}d current=%{public}d edit=%{public}s',
+          requestToken,
+          this.agentRuleSaveRequestToken,
+          queuedEditId
+        );
+        return;
+      }
+      if (queuedEditId.length === 0 || this.editingAgentRuleId !== queuedEditId) {
+        hilog.info(
+          DOMAIN,
+          TAG,
+          'agent save queue skip edit changed token=%{public}d queued=%{public}s current=%{public}s',
+          requestToken,
+          queuedEditId,
+          this.editingAgentRuleId
+        );
+        return;
+      }
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent save queued flush token=%{public}d edit=%{public}s match=%{public}s',
+        requestToken,
+        this.editingAgentRuleId,
+        this.describeMatchValue(this.draftAgentRuleMatchValue)
+      );
+      this.saveEditingAgentRule();
+    }, 80);
   }
 
   private deleteEditingAgentRule(): void {
@@ -937,18 +1090,30 @@ export struct RulesPage {
     this.runAgentRuleAnimation(() => {
       this.agentRuleDropdown = this.agentRuleDropdown === dropdown ? AGENT_RULE_DROPDOWN_NONE : dropdown;
       this.dohDropdownExpanded = false;
+      this.browserDohDropdownExpanded = false;
       this.agentRuleNotice = '';
     });
   }
 
   private selectDraftAgentRuleType(ruleType: AgentRuleType): void {
     this.runAgentRuleAnimation(() => {
+      const previousType = this.draftAgentRuleType;
+      const previousMatchValue = this.draftAgentRuleMatchValue;
       this.draftAgentRuleType = ruleType;
       if (!this.agentRuleNeedsMatch(this.draftAgentRuleType)) {
         this.draftAgentRuleMatchValue = '';
       }
       this.agentRuleNotice = '';
       this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'agent select rule type from=%{public}s to=%{public}s matchBefore=%{public}s matchAfter=%{public}s',
+        previousType,
+        this.draftAgentRuleType,
+        this.describeMatchValue(previousMatchValue),
+        this.describeMatchValue(this.draftAgentRuleMatchValue)
+      );
     });
   }
 
@@ -960,26 +1125,45 @@ export struct RulesPage {
     });
   }
 
-  private toggleDohDropdown(): void {
+  private toggleDohDropdown(browserDoh: boolean = false): void {
     this.runAgentRuleAnimation(() => {
-      this.dohDropdownExpanded = !this.dohDropdownExpanded;
+      if (browserDoh) {
+        this.browserDohDropdownExpanded = !this.browserDohDropdownExpanded;
+        this.dohDropdownExpanded = false;
+      } else {
+        this.dohDropdownExpanded = !this.dohDropdownExpanded;
+        this.browserDohDropdownExpanded = false;
+      }
       this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
     });
   }
 
-  private selectDohProvider(provider: string): void {
+  private selectDohProvider(browserDoh: boolean, provider: string): void {
     this.runAgentRuleAnimation(() => {
-      this.dohDropdownExpanded = false;
+      if (browserDoh) {
+        this.browserDohDropdownExpanded = false;
+      } else {
+        this.dohDropdownExpanded = false;
+      }
     });
+    if (browserDoh) {
+      this.onSelectBrowserDohProvider(provider);
+      return;
+    }
     this.onSelectDohProvider(provider);
   }
 
-  private changeDohProviderInput(value: string): void {
-    this.onSelectDohProvider(this.buildDohProviderFromEditable(value));
+  private changeDohProviderInput(browserDoh: boolean, value: string): void {
+    const provider = this.buildDohProviderFromEditable(value);
+    if (browserDoh) {
+      this.onSelectBrowserDohProvider(provider);
+      return;
+    }
+    this.onSelectDohProvider(provider);
   }
 
-  private dohEditableValue(): string {
-    let provider = this.dohProvider.trim();
+  private dohEditableValue(browserDoh: boolean = false): string {
+    let provider = (browserDoh ? this.browserDohProvider : this.dohProvider).trim();
     if (provider.indexOf(DOH_PREFIX) === 0) {
       provider = provider.substring(DOH_PREFIX.length);
     }
@@ -988,6 +1172,10 @@ export struct RulesPage {
       provider = provider.substring(0, provider.length - DOH_SUFFIX.length);
     }
     return provider;
+  }
+
+  private isDohDropdownExpanded(browserDoh: boolean): boolean {
+    return browserDoh ? this.browserDohDropdownExpanded : this.dohDropdownExpanded;
   }
 
   private buildDohProviderFromEditable(value: string): string {
@@ -1006,12 +1194,21 @@ export struct RulesPage {
   }
 
   private fillDraftRuleMatchHint(): void {
+    const previousValue = this.draftAgentRuleMatchValue;
     if (this.draftAgentRuleType === 'wifiGateway') {
       this.draftAgentRuleMatchValue = '192.168.0.1';
     } else if (this.draftAgentRuleType === 'wifiSsid') {
       this.draftAgentRuleMatchValue = 'Home WiFi';
     }
     this.agentRuleNotice = '';
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'agent fill match hint type=%{public}s before=%{public}s after=%{public}s',
+      this.draftAgentRuleType,
+      this.describeMatchValue(previousValue),
+      this.describeMatchValue(this.draftAgentRuleMatchValue)
+    );
   }
 
   private startAgentRuleDrag(ruleId: string): void {
@@ -1219,8 +1416,9 @@ export struct RulesPage {
     hilog.info(
       DOMAIN,
       TAG,
-      'agent reset edit state edit=%{public}s dragging=%{public}s dragOrder=%{public}s suppress=%{public}s token=%{public}d',
+      'agent reset edit state edit=%{public}s match=%{public}s dragging=%{public}s dragOrder=%{public}s suppress=%{public}s token=%{public}d',
       this.editingAgentRuleId,
+      this.describeMatchValue(this.draftAgentRuleMatchValue),
       this.draggingAgentRuleId,
       this.agentRuleOrderForLog(this.dragAgentRuleOrderIds),
       String(this.suppressAgentRuleCardClick),
@@ -1235,14 +1433,33 @@ export struct RulesPage {
     this.agentRuleNotice = '';
     this.agentRuleDropdown = AGENT_RULE_DROPDOWN_NONE;
     this.dohDropdownExpanded = false;
+    this.browserDohDropdownExpanded = false;
     this.draggingAgentRuleId = '';
     this.dragHoverAgentRuleId = '';
     this.dragAgentRuleOrderIds = [];
     this.agentRuleDragStartIndex = -1;
     this.agentRuleDragLastTargetIndex = -1;
+    this.agentRuleSaveRequestToken++;
     this.suppressAgentRuleCardClick = false;
     this.suppressAgentRuleCardClickToken++;
     this.agentRuleDropCommitted = false;
+  }
+
+  private describeMatchValue(value: string): string {
+    const normalized = value.trim();
+    if (normalized.length === 0) {
+      return '<empty>';
+    }
+    return normalized + '(len=' + String(normalized.length) + ')';
+  }
+
+  private agentRuleRenderKey(rule: AgentRule): string {
+    return rule.id + '|' +
+      rule.type + '|' +
+      rule.matchValue + '|' +
+      rule.targetTunnelId + '|' +
+      rule.targetTunnelName + '|' +
+      String(rule.enabled);
   }
 
   private agentRuleIndex(ruleId: string): number {
@@ -1350,6 +1567,9 @@ export struct RulesPage {
     }
     if (switchKey === 'doh') {
       return this.dohEnabled;
+    }
+    if (switchKey === 'browserDoh') {
+      return this.browserDohEnabled;
     }
     return false;
   }

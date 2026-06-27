@@ -35,6 +35,7 @@ export struct WebBrowserHost {
   @Prop @Watch('onLaunchTargetChanged') initialUrl: string = DEFAULT_WEB_HOME_URL;
   @Prop @Watch('onLaunchTargetChanged') launchInstanceId: string = '';
   @Prop @Watch('onLaunchTargetChanged') launchRevision: number = 0;
+  @StorageProp('webBrowserBackgroundPipRevision') private backgroundPipRevision: number = 0;
   onClose: () => void = () => {};
   onBackHandlerReady: (handler: () => boolean) => void = () => {};
   onBackHandlerRelease: () => void = () => {};
@@ -43,9 +44,15 @@ export struct WebBrowserHost {
   @State private bookmarkHomeVisible: boolean = false;
   @State private bookmarks: WebBookmarkEntry[] = [];
   @State private webTabStates: WebTabState[] = [];
+  @State private tabStateRevision: number = 0;
+  @State private clearTabStackRevision: number = 0;
+  @State private clearTabStackTargetId: string = '';
+  @State private clearTabStackFallbackUrl: string = '';
   @State private retainedShortcutInstanceIds: string[] = [];
   private backHandlers: BrowserBackHandlerEntry[] = [];
   private appeared: boolean = false;
+  private pendingTabStateMerges: WebTabState[] = [];
+  private pendingTabStateMergeTimer: number = -1;
 
   aboutToAppear(): void {
     this.appeared = true;
@@ -61,6 +68,7 @@ export struct WebBrowserHost {
 
   aboutToDisappear(): void {
     this.appeared = false;
+    this.stopPendingTabStateMergeTimer();
     this.onBackHandlerRelease();
   }
 
@@ -72,11 +80,17 @@ export struct WebBrowserHost {
           persistBrowserState: true,
           webControllerId: instance.id,
           instanceKind: instance.kind,
+          hostActive: instance.id === this.activeInstanceId,
+          backgroundPipRevisionFromHost: instance.id === this.activeInstanceId ? this.backgroundPipRevision : 0,
           isHomeInstance: instance.id === WEB_HOME_INSTANCE_ID,
           allowBookmarkHome: instance.id === WEB_HOME_INSTANCE_ID,
           showAddressBar: instance.id === WEB_HOME_INSTANCE_ID,
           bookmarkHomeVisibleFromHost: this.bookmarkHomeVisible && instance.id === WEB_HOME_INSTANCE_ID,
           homeTabBackCountFromHost: this.tabBackCount(WEB_HOME_INSTANCE_ID),
+          tabStateRevisionFromHost: this.tabStateRevision,
+          clearTabStackRevisionFromHost: this.clearTabStackRevision,
+          clearTabStackTargetIdFromHost: this.clearTabStackTargetId,
+          clearTabStackFallbackUrlFromHost: this.clearTabStackFallbackUrl,
           tabBackCountFromHost: (bookmarkId: string): number => this.tabBackCount(bookmarkId),
           onClose: () => {
             this.onClose();
@@ -97,7 +111,10 @@ export struct WebBrowserHost {
             this.openBookmarkInstance(bookmark);
           },
           onClearInstanceTabStack: (instanceId: string, fallbackUrl: string) => {
-            this.clearInstanceTabStack(this.hostTabIdForClear(instanceId, fallbackUrl), fallbackUrl);
+            this.clearInstanceTabStack(instanceId, fallbackUrl);
+          },
+          onClearAllBookmarkStacks: () => {
+            this.clearAllBookmarkStacks();
           },
           onCloseBookmarkInstance: (bookmark: WebBookmarkEntry) => {
             this.closeBookmarkInstanceFromBadge(bookmark);
@@ -109,7 +126,7 @@ export struct WebBrowserHost {
             this.loadBookmarks();
           },
           onTabStateChanged: (state: WebTabState) => {
-            this.mergeTabState(state);
+            this.handleTabStateChanged(state);
           }
         })
           .width('100%')
@@ -282,7 +299,7 @@ export struct WebBrowserHost {
 
   private restoredHomeUrl(): string {
     const state = this.webStateStore().readTabStateMeta(WEB_HOME_INSTANCE_ID, '');
-    if (state.url.length > 0 && !this.isBookmarkHomeUrl(state.url)) {
+    if (this.isWebLoadableUrl(state.url)) {
       return this.normalizeUrl(state.url);
     }
     return '';
@@ -481,49 +498,70 @@ export struct WebBrowserHost {
     });
   }
 
-  private resetInstance(instanceId: string, fallbackUrl: string): void {
-    const id = this.safeFileSegment(instanceId);
-    if (id.length === 0) {
-      return;
-    }
-    const next: BrowserInstance[] = [];
-    for (let index = 0; index < this.instances.length; index++) {
-      const instance = this.instances[index];
-      if (instance.id === id) {
-        next.push({
-          id: instance.id,
-          kind: instance.kind,
-          initialUrl: this.normalizeUrl(fallbackUrl),
-          title: instance.title,
-          source: instance.source,
-          bookmarkId: instance.bookmarkId,
-          shortcutId: instance.shortcutId,
-          renderKey: id + '_reset_' + Date.now().toString()
-        });
-      } else {
-        next.push(instance);
-      }
-    }
-    this.instances = next;
-  }
-
   private clearInstanceTabStack(instanceId: string, fallbackUrl: string): void {
     const id = this.safeFileSegment(instanceId);
     if (id.length === 0) {
       return;
     }
     const fallback = this.tabFallbackUrl(id, fallbackUrl);
+    hilog.info(DOMAIN, TAG,
+      'clear instance tab stack id=%{public}s fallback=%{public}s active=%{public}s bookmarkHomeVisible=%{public}s backCount=%{public}d states=%{public}s',
+      id,
+      fallback,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible),
+      this.tabBackCount(id),
+      this.describeTabStates());
+    this.removePendingTabStateMerge(id);
     const state: WebTabState = {
       id: id,
       url: this.normalizeUrl(fallback),
       backCount: 0
     };
     this.mergeTabState(state);
+    hilog.info(DOMAIN, TAG,
+      'clear instance tab stack merged id=%{public}s states=%{public}s',
+      id,
+      this.describeTabStates());
     this.webStateStore().persistTabState(state);
     this.webStateStore().truncateWebState(id);
     if (id !== WEB_BOOKMARKS_HOME_TAB_ID) {
-      this.resetInstance(id, fallback);
+      this.requestControllerHistoryClear(id, fallback);
     }
+  }
+
+  private requestControllerHistoryClear(instanceId: string, fallbackUrl: string): void {
+    this.clearTabStackTargetId = instanceId;
+    this.clearTabStackFallbackUrl = this.normalizeUrl(fallbackUrl);
+    this.clearTabStackRevision++;
+    hilog.info(DOMAIN, TAG,
+      'request controller history clear id=%{public}s fallback=%{public}s revision=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+      this.clearTabStackTargetId,
+      this.clearTabStackFallbackUrl,
+      this.clearTabStackRevision,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
+  }
+
+  private clearAllBookmarkStacks(): void {
+    if (this.tabBackCount(WEB_HOME_INSTANCE_ID) > 0) {
+      this.clearInstanceTabStack(WEB_HOME_INSTANCE_ID, DEFAULT_WEB_HOME_URL);
+    }
+    const targets: WebBookmarkEntry[] = [];
+    for (let index = 0; index < this.bookmarks.length; index++) {
+      const bookmark = this.bookmarks[index];
+      if (this.tabBackCount(bookmark.id) > 0) {
+        targets.push(bookmark);
+      }
+    }
+    if (targets.length === 0) {
+      this.loadTabStates();
+      return;
+    }
+    for (let index = 0; index < targets.length; index++) {
+      this.closeBookmarkInstanceFromBadge(targets[index]);
+    }
+    this.loadTabStates();
   }
 
   private clearBookmarkInstanceState(instanceId: string, fallbackUrl: string): void {
@@ -606,7 +644,129 @@ export struct WebBrowserHost {
       const bookmark = this.bookmarks[index];
       states.push(this.webStateStore().readTabStateMeta(bookmark.id, bookmark.url));
     }
+    hilog.info(DOMAIN, TAG,
+      'loadTabStates count=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+      states.length,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
     this.webTabStates = states;
+    this.bumpTabStateRevision();
+  }
+
+  private handleTabStateChanged(state: WebTabState): void {
+    const id = this.safeFileSegment(state.id);
+    if (id.length === 0) {
+      return;
+    }
+    const nextState: WebTabState = {
+      id: id,
+      url: state.url,
+      backCount: Math.max(0, state.backCount)
+    };
+    if (!this.shouldMergeTabState(nextState)) {
+      hilog.info(DOMAIN, TAG,
+        'skip tab state merge unchanged id=%{public}s url=%{public}s backCount=%{public}d states=%{public}s',
+        nextState.id,
+        nextState.url,
+        nextState.backCount,
+        this.describeTabStates());
+      return;
+    }
+    this.enqueueTabStateMerge(nextState);
+  }
+
+  private enqueueTabStateMerge(state: WebTabState): void {
+    const next: WebTabState[] = [];
+    let updated = false;
+    for (let index = 0; index < this.pendingTabStateMerges.length; index++) {
+      const pending = this.pendingTabStateMerges[index];
+      if (pending.id === state.id) {
+        next.push(state);
+        updated = true;
+      } else {
+        next.push(pending);
+      }
+    }
+    if (!updated) {
+      next.push(state);
+    }
+    this.pendingTabStateMerges = next;
+    hilog.info(DOMAIN, TAG,
+      'defer tab state merge id=%{public}s url=%{public}s backCount=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+      state.id,
+      state.url,
+      state.backCount,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
+    if (this.pendingTabStateMergeTimer >= 0) {
+      return;
+    }
+    this.pendingTabStateMergeTimer = setTimeout(() => {
+      this.flushPendingTabStateMerges();
+    }, 0);
+  }
+
+  private flushPendingTabStateMerges(): void {
+    this.pendingTabStateMergeTimer = -1;
+    if (!this.appeared) {
+      this.pendingTabStateMerges = [];
+      hilog.info(DOMAIN, TAG, 'skip deferred tab state merges host disappeared');
+      return;
+    }
+    const pending = this.pendingTabStateMerges;
+    this.pendingTabStateMerges = [];
+    for (let index = 0; index < pending.length; index++) {
+      const state = pending[index];
+      if (!this.shouldMergeTabState(state)) {
+        continue;
+      }
+      hilog.info(DOMAIN, TAG,
+        'flush deferred tab state merge id=%{public}s url=%{public}s backCount=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+        state.id,
+        state.url,
+        state.backCount,
+        this.activeInstanceId,
+        String(this.bookmarkHomeVisible));
+      this.mergeTabState(state);
+    }
+  }
+
+  private stopPendingTabStateMergeTimer(): void {
+    if (this.pendingTabStateMergeTimer >= 0) {
+      clearTimeout(this.pendingTabStateMergeTimer);
+      this.pendingTabStateMergeTimer = -1;
+    }
+    this.pendingTabStateMerges = [];
+  }
+
+  private removePendingTabStateMerge(tabId: string): void {
+    const id = this.safeFileSegment(tabId);
+    if (id.length === 0 || this.pendingTabStateMerges.length === 0) {
+      return;
+    }
+    const next: WebTabState[] = [];
+    const before = this.pendingTabStateMerges.length;
+    for (let index = 0; index < this.pendingTabStateMerges.length; index++) {
+      if (this.pendingTabStateMerges[index].id !== id) {
+        next.push(this.pendingTabStateMerges[index]);
+      }
+    }
+    this.pendingTabStateMerges = next;
+    hilog.info(DOMAIN, TAG,
+      'remove pending tab state merge id=%{public}s before=%{public}d after=%{public}d',
+      id,
+      before,
+      this.pendingTabStateMerges.length);
+  }
+
+  private shouldMergeTabState(state: WebTabState): boolean {
+    for (let index = 0; index < this.webTabStates.length; index++) {
+      const current = this.webTabStates[index];
+      if (current.id === state.id) {
+        return current.url !== state.url || current.backCount !== Math.max(0, state.backCount);
+      }
+    }
+    return true;
   }
 
   private mergeTabState(state: WebTabState): void {
@@ -614,6 +774,13 @@ export struct WebBrowserHost {
     if (id.length === 0) {
       return;
     }
+    hilog.info(DOMAIN, TAG,
+      'mergeTabState id=%{public}s url=%{public}s backCount=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+      id,
+      state.url,
+      state.backCount,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
     const next: WebTabState[] = [];
     let updated = false;
     for (let index = 0; index < this.webTabStates.length; index++) {
@@ -636,10 +803,16 @@ export struct WebBrowserHost {
       });
     }
     this.webTabStates = next;
+    this.bumpTabStateRevision();
   }
 
   private removeTabState(tabId: string): void {
     const id = this.safeFileSegment(tabId);
+    hilog.info(DOMAIN, TAG,
+      'removeTabState id=%{public}s active=%{public}s bookmarkHomeVisible=%{public}s',
+      id,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
     const next: WebTabState[] = [];
     for (let index = 0; index < this.webTabStates.length; index++) {
       if (this.webTabStates[index].id !== id) {
@@ -647,6 +820,16 @@ export struct WebBrowserHost {
       }
     }
     this.webTabStates = next;
+    this.bumpTabStateRevision();
+  }
+
+  private bumpTabStateRevision(): void {
+    this.tabStateRevision++;
+    hilog.info(DOMAIN, TAG,
+      'bumpTabStateRevision revision=%{public}d active=%{public}s bookmarkHomeVisible=%{public}s',
+      this.tabStateRevision,
+      this.activeInstanceId,
+      String(this.bookmarkHomeVisible));
   }
 
   private bookmarkInitialUrl(bookmark: WebBookmarkEntry): string {
@@ -672,14 +855,17 @@ export struct WebBrowserHost {
   }
 
   private homeInstanceFallbackUrl(fallbackUrl: string): string {
+    if (this.isBookmarkHomeUrl(fallbackUrl)) {
+      return WEB_BOOKMARKS_HOME_URL;
+    }
+    if (this.isWebLoadableUrl(fallbackUrl)) {
+      return this.normalizeUrl(fallbackUrl);
+    }
     const stored = this.tabUrl(WEB_HOME_INSTANCE_ID);
-    if (stored.length > 0 && !this.isBookmarkHomeUrl(stored)) {
-      return stored;
+    if (this.isWebLoadableUrl(stored)) {
+      return this.normalizeUrl(stored);
     }
-    if (fallbackUrl.length > 0 && !this.isBookmarkHomeUrl(fallbackUrl)) {
-      return fallbackUrl;
-    }
-    return DEFAULT_WEB_HOME_URL;
+    return WEB_BOOKMARKS_HOME_URL;
   }
 
   private tabFallbackUrl(tabId: string, fallbackUrl: string): string {
@@ -692,13 +878,6 @@ export struct WebBrowserHost {
     return fallbackUrl;
   }
 
-  private hostTabIdForClear(instanceId: string, fallbackUrl: string): string {
-    if (this.safeFileSegment(instanceId) === WEB_HOME_INSTANCE_ID && this.isBookmarkHomeUrl(fallbackUrl)) {
-      return WEB_BOOKMARKS_HOME_TAB_ID;
-    }
-    return instanceId;
-  }
-
   private tabUrl(tabId: string): string {
     const id = this.safeFileSegment(tabId);
     for (let index = 0; index < this.webTabStates.length; index++) {
@@ -707,6 +886,18 @@ export struct WebBrowserHost {
       }
     }
     return '';
+  }
+
+  private describeTabStates(): string {
+    if (this.webTabStates.length === 0) {
+      return '[]';
+    }
+    const parts: string[] = [];
+    for (let index = 0; index < this.webTabStates.length; index++) {
+      const state = this.webTabStates[index];
+      parts.push(state.id + ':' + state.url + '#' + String(state.backCount));
+    }
+    return '[' + parts.join(';') + ']';
   }
 
   private hasInstance(instanceId: string): boolean {
@@ -764,6 +955,12 @@ export struct WebBrowserHost {
     return url.trim() === 'about:smart-bookmarks';
   }
 
+  private isWebLoadableUrl(url: string): boolean {
+    const value = url.trim();
+    return value.startsWith('http://') || value.startsWith('https://') || value.startsWith('file://') ||
+      value.startsWith('resource://');
+  }
+
   private normalizeUrl(raw: string): string {
     const value = raw.trim();
     if (value.length === 0) {
@@ -775,7 +972,7 @@ export struct WebBrowserHost {
     if (value.indexOf('.') >= 0 && value.indexOf(' ') < 0) {
       return 'https://' + value;
     }
-    return 'https://www.bing.com/search?q=' + encodeURIComponent(value);
+    return 'https://www.google.com/search?q=' + encodeURIComponent(value);
   }
 
   private webStateStore(): WebBrowserStateStore {

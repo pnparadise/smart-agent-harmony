@@ -1,9 +1,12 @@
 import { unifiedDataChannel } from '@kit.ArkData';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WebBookmarkEntry } from '../wireguard/ConfigStore';
 import {
   TEXT_PRIMARY
 } from './PageStyle';
 
+const DOMAIN = 0x0001;
+const TAG = 'WebBookmarkHome';
 const BOOKMARK_TILE_HEIGHT = 104;
 const BOOKMARK_DOCK_HEIGHT = 132;
 const BOOKMARK_DOCK_BUTTON_HEIGHT = 104;
@@ -27,16 +30,18 @@ export struct WebBookmarkHome {
   @Prop bookmarks: WebBookmarkEntry[] = [];
   @Prop loading: boolean = false;
   @Prop topPadding: number = 0;
+  @Prop tabStateRevision: number = 0;
+  @Prop homeTabBackCountValue: number = 0;
   @Prop homeTitle: string = 'Browser';
   @Prop homeIconSource: ResourceStr = $r('app.media.ic_browser_shortcut');
   iconSource: (url: string) => ResourceStr = () => $r('app.media.ic_browser_shortcut');
   tabBackCount: (bookmarkId: string) => number = () => 0;
-  homeTabBackCount: () => number = () => 0;
   onOpenHome: () => void = () => {};
   onOpenBookmark: (bookmark: WebBookmarkEntry) => void = () => {};
   onCreateDesktopShortcut: (bookmark: WebBookmarkEntry) => void = () => {};
   onDeleteBookmark: (bookmark: WebBookmarkEntry) => void = () => {};
   onClearHomeTabStack: () => void = () => {};
+  onClearAllBookmarkStacks: () => void = () => {};
   onCloseBookmarkInstance: (bookmark: WebBookmarkEntry) => void = () => {};
   onPullRefreshStart: () => void = () => {};
   onPullRefreshUpdate: (offsetY: number) => void = () => {};
@@ -45,7 +50,6 @@ export struct WebBookmarkHome {
   @State private bookmarkDragActive: boolean = false;
   @State private draggingBadgeId: string = '';
   @State private clearingBadgeId: string = '';
-  @State private clearedBadgeIds: string[] = [];
   @State private badgeTouchId: string = '';
   @State private badgeDragOffsetX: number = 0;
   @State private badgeDragOffsetY: number = 0;
@@ -57,24 +61,20 @@ export struct WebBookmarkHome {
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Column() {
-        Text('书签栏')
-          .fontSize(24)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#A8B0BC')
-          .width('100%')
-          .height(30)
-          .margin({ bottom: 18 })
+        this.buildHeader()
 
         Grid() {
-          GridItem() {
-            this.buildHomeTile()
-          }
+          ForEach([this.homeGridKey()], (key: string) => {
+            GridItem() {
+              this.buildHomeTile()
+            }
+          }, (key: string) => key)
           if (this.bookmarks.length > 0) {
             ForEach(this.bookmarks, (bookmark: WebBookmarkEntry) => {
               GridItem() {
                 this.buildBookmarkTile(bookmark);
               }
-            }, (bookmark: WebBookmarkEntry) => bookmark.id)
+            }, (bookmark: WebBookmarkEntry) => bookmark.id + '_' + this.tabStateRevision.toString())
           }
         }
         .columnsTemplate('1fr 1fr 1fr 1fr')
@@ -114,10 +114,58 @@ export struct WebBookmarkHome {
   }
 
   @Builder
+  private buildHeader() {
+    Row() {
+      Text('书签栏')
+        .fontSize(24)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#515151')
+
+      Blank()
+        .layoutWeight(1)
+
+      this.buildClearAllButton()
+    }
+    .width('100%')
+    .height(36)
+    .alignItems(VerticalAlign.Center)
+    .margin({ bottom: 18 })
+  }
+
+  @Builder
+  private buildClearAllButton() {
+    Button() {
+      Image($r('app.media.ic_sweep_gray'))
+        .width(20)
+        .height(20)
+    }
+      .type(ButtonType.Normal)
+      .width(36)
+      .height(36)
+      .padding(0)
+      .backgroundColor('#EAF0F8')
+      .borderRadius(12)
+      .opacity(this.canClearAllBookmarkStacks() ? 1 : 0.36)
+      .onClick(() => {
+        hilog.info(DOMAIN, TAG,
+          'clear all button clicked canClear=%{public}s homeBackCount=%{public}d bookmarkClearCount=%{public}d dragActive=%{public}s',
+          String(this.canClearAllBookmarkStacks()),
+          this.homeTabBackCountForRender(),
+          this.clearableBookmarkStackCount(),
+          String(this.isInteractiveDragActive()));
+        if (!this.canClearAllBookmarkStacks()) {
+          return;
+        }
+        this.onClearAllBookmarkStacks();
+      })
+  }
+
+  @Builder
   private buildHomeTile() {
     Column() {
-      this.buildTileVisual(this.homeTitle, this.homeIconSource, this.homeTabBackCount(), false, 'home', undefined)
+      this.buildTileVisual(this.homeTitle, this.homeIconSource, this.homeTabBackCountForRender(), false, 'home', undefined)
     }
+    .id('home_tile_' + String(this.tabStateRevision) + '_' + String(this.homeTabBackCountForRender()))
     .width('100%')
     .height(BOOKMARK_TILE_HEIGHT)
     .justifyContent(FlexAlign.Center)
@@ -136,9 +184,11 @@ export struct WebBookmarkHome {
   @Builder
   private buildBookmarkTile(bookmark: WebBookmarkEntry) {
     Column() {
-      this.buildTileVisual(bookmark.title, this.iconSource(bookmark.url), this.tabBackCount(bookmark.id),
+      this.buildTileVisual(bookmark.title, this.iconSource(bookmark.url), this.tabBackCountForRender(bookmark.id),
         this.draggingBookmarkId === bookmark.id, bookmark.id, bookmark)
     }
+    .id('bookmark_tile_' + bookmark.id + '_' + String(this.tabStateRevision) + '_' +
+      String(this.tabBackCountForRender(bookmark.id)))
     .width('100%')
     .height(BOOKMARK_TILE_HEIGHT)
     .justifyContent(FlexAlign.Center)
@@ -234,6 +284,7 @@ export struct WebBookmarkHome {
       .translate(this.draggingBadgeId === badgeId || this.clearingBadgeId === badgeId ?
         { x: this.badgeDragOffsetX, y: this.badgeDragOffsetY } : { x: 0, y: 0 })
       .zIndex(this.draggingBadgeId === badgeId ? 20 : 1)
+      .id('badge_' + badgeId + '_' + String(this.tabStateRevision) + '_' + String(backCount))
       .animation({ duration: 180, curve: Curve.EaseOut })
       .draggable(false)
       .priorityGesture(
@@ -486,6 +537,48 @@ export struct WebBookmarkHome {
     return null;
   }
 
+  private canClearAllBookmarkStacks(): boolean {
+    if (this.homeTabBackCountForRender() > 0) {
+      return true;
+    }
+    for (let index = 0; index < this.bookmarks.length; index++) {
+      if (this.tabBackCountForRender(this.bookmarks[index].id) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private clearableBookmarkStackCount(): number {
+    let count = 0;
+    for (let index = 0; index < this.bookmarks.length; index++) {
+      if (this.tabBackCountForRender(this.bookmarks[index].id) > 0) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private homeTabBackCountForRender(): number {
+    const revision = this.tabStateRevision;
+    if (revision < 0) {
+      return 0;
+    }
+    return Math.max(0, this.homeTabBackCountValue);
+  }
+
+  private homeGridKey(): string {
+    return 'home_' + String(this.tabStateRevision) + '_' + String(this.homeTabBackCountForRender());
+  }
+
+  private tabBackCountForRender(bookmarkId: string): number {
+    const revision = this.tabStateRevision;
+    if (revision < 0) {
+      return 0;
+    }
+    return Math.max(0, this.tabBackCount(bookmarkId));
+  }
+
   private badgeText(count: number): string {
     if (count > 99) {
       return '99+';
@@ -509,7 +602,7 @@ export struct WebBookmarkHome {
   }
 
   private isBadgeHidden(badgeId: string): boolean {
-    return this.clearingBadgeId === badgeId || this.hasClearedBadgeId(badgeId);
+    return this.clearingBadgeId === badgeId;
   }
 
   private handleBadgeTouch(badgeId: string, event?: TouchEvent): void {
@@ -549,32 +642,51 @@ export struct WebBookmarkHome {
   }
 
   private releaseBadgeDrag(badgeId: string, backCount: number, bookmark?: WebBookmarkEntry): void {
+    hilog.info(DOMAIN, TAG, 'release badge drag id=%{public}s backCount=%{public}d offset=(%{public}f,%{public}f)',
+      badgeId, backCount, this.badgeDragOffsetX, this.badgeDragOffsetY);
     if (!this.isBadgeReleasedOutside(backCount)) {
+      hilog.info(DOMAIN, TAG, 'badge drag not outside id=%{public}s', badgeId);
       this.finishBadgeDragOnly();
       return;
     }
+    hilog.info(DOMAIN, TAG, 'badge drag clear accepted id=%{public}s', badgeId);
     this.clearBadgeStack(badgeId, bookmark);
   }
 
   private isBadgeReleasedOutside(backCount: number): boolean {
     const touchWidth = Math.max(BOOKMARK_BADGE_TOUCH_SIZE, this.badgeWidth(backCount));
-    const centerX = this.badgeLeft(backCount) + touchWidth / 2 + this.badgeDragOffsetX;
-    const centerY = BOOKMARK_BADGE_TOUCH_SIZE / 2 + this.badgeDragOffsetY;
+    const startCenterX = this.badgeLeft(backCount) + touchWidth / 2;
+    const startCenterY = BOOKMARK_BADGE_TOUCH_SIZE / 2;
+    const centerX = startCenterX + this.badgeDragOffsetX;
+    const centerY = startCenterY + this.badgeDragOffsetY;
     const distance = Math.sqrt(this.badgeDragOffsetX * this.badgeDragOffsetX +
       this.badgeDragOffsetY * this.badgeDragOffsetY);
-    return (centerX < 0 || centerX > BOOKMARK_ICON_STACK_WIDTH ||
-      centerY < 0 || centerY > BOOKMARK_ICON_STACK_HEIGHT) && distance >= BOOKMARK_BADGE_CLEAR_DISTANCE;
+    if (distance < BOOKMARK_BADGE_CLEAR_DISTANCE) {
+      return false;
+    }
+    if (centerX < 0 || centerX > BOOKMARK_ICON_STACK_WIDTH ||
+      centerY < 0 || centerY > BOOKMARK_ICON_STACK_HEIGHT) {
+      return true;
+    }
+    const iconCenterX = BOOKMARK_ICON_STACK_WIDTH / 2;
+    const iconCenterY = BOOKMARK_ICON_STACK_HEIGHT / 2;
+    const startRadius = Math.sqrt((startCenterX - iconCenterX) * (startCenterX - iconCenterX) +
+      (startCenterY - iconCenterY) * (startCenterY - iconCenterY));
+    const currentRadius = Math.sqrt((centerX - iconCenterX) * (centerX - iconCenterX) +
+      (centerY - iconCenterY) * (centerY - iconCenterY));
+    return currentRadius >= startRadius + BOOKMARK_BADGE_CLEAR_DISTANCE / 2;
   }
 
   private clearBadgeStack(badgeId: string, bookmark?: WebBookmarkEntry): void {
     if (badgeId.length === 0) {
       return;
     }
+    hilog.info(DOMAIN, TAG, 'clear badge stack id=%{public}s bookmark=%{public}s',
+      badgeId, bookmark !== undefined ? bookmark.id : '');
     this.badgeDragActive = false;
     this.badgeTouchId = '';
     this.draggingBadgeId = '';
     this.clearingBadgeId = badgeId;
-    this.rememberClearedBadgeId(badgeId);
     const token = ++this.suppressBookmarkClickToken;
     this.performBadgeClearAction(badgeId, bookmark);
     setTimeout(() => {
@@ -591,35 +703,21 @@ export struct WebBookmarkHome {
 
   private performBadgeClearAction(badgeId: string, bookmark?: WebBookmarkEntry): void {
     if (badgeId === 'home') {
+      hilog.info(DOMAIN, TAG, 'perform home badge clear action homeBackCount=%{public}d',
+        this.homeTabBackCountForRender());
       this.onClearHomeTabStack();
       return;
     }
     if (bookmark !== undefined) {
+      hilog.info(DOMAIN, TAG, 'perform bookmark badge clear action id=%{public}s', bookmark.id);
       this.onCloseBookmarkInstance(bookmark);
       return;
     }
     const matched = this.bookmarkById(badgeId);
     if (matched !== null) {
+      hilog.info(DOMAIN, TAG, 'perform matched bookmark badge clear action id=%{public}s', matched.id);
       this.onCloseBookmarkInstance(matched);
     }
-  }
-
-  private rememberClearedBadgeId(badgeId: string): void {
-    if (this.hasClearedBadgeId(badgeId)) {
-      return;
-    }
-    const next = this.clearedBadgeIds.slice();
-    next.push(badgeId);
-    this.clearedBadgeIds = next;
-  }
-
-  private hasClearedBadgeId(badgeId: string): boolean {
-    for (let index = 0; index < this.clearedBadgeIds.length; index++) {
-      if (this.clearedBadgeIds[index] === badgeId) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private finishBadgeDragOnly(): void {

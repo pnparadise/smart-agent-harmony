@@ -5,7 +5,8 @@ import {
   TEXT_PRIMARY,
   TEXT_SECONDARY
 } from './PageStyle';
-import { WebBrowserErrorState } from './WebBrowserTypes';
+import { WebAddressSuggestionItem, WebBrowserErrorState } from './WebBrowserTypes';
+import { WebAddressSuggestionPanel } from './WebAddressSuggestionPanel';
 
 const TOOLBAR_HEIGHT = 52;
 const TOOLBAR_ICON_SIZE = 21;
@@ -21,8 +22,9 @@ export struct WebBrowserChrome {
   @Prop loading: boolean = false;
   @Prop progress: number = 100;
   @Prop canGoForward: boolean = false;
+  @Prop canAddBookmark: boolean = false;
   @Prop bookmarkedUrls: string[] = [];
-  @Prop notice: string = '';
+  @Prop addressSuggestions: WebAddressSuggestionItem[] = [];
   @Prop webError: WebBrowserErrorState = {
     visible: false,
     url: '',
@@ -49,6 +51,8 @@ export struct WebBrowserChrome {
   onAddressChange: (value: string) => void = () => {};
   onAddressSubmit: () => void = () => {};
   onClearAddress: () => void = () => {};
+  onSelectAddressSuggestion: (item: WebAddressSuggestionItem) => void = () => {};
+  onDeleteAddressSuggestionHistory: (item: WebAddressSuggestionItem) => void = () => {};
   onGoForward: () => void = () => {};
   onOpenBookmarks: () => void = () => {};
   onAddBookmark: () => void = () => {};
@@ -57,6 +61,9 @@ export struct WebBrowserChrome {
   onHideDeleteBookmarkConfirm: () => void = () => {};
   onSubmitDeleteBookmarkConfirm: () => void = () => {};
   onReloadWebError: () => void = () => {};
+  onWebErrorPullRefreshStart: () => void = () => {};
+  onWebErrorPullRefreshUpdate: (offsetY: number) => void = () => {};
+  onWebErrorPullRefreshEnd: () => void = () => {};
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
@@ -68,12 +75,12 @@ export struct WebBrowserChrome {
         this.buildPullRefreshIndicator();
       }
 
-      if (this.webError.visible) {
-        this.buildWebError();
+      if (this.showAddressSuggestionPanel()) {
+        this.buildAddressSuggestionPanel();
       }
 
-      if (this.notice.length > 0) {
-        this.buildNotice();
+      if (this.webError.visible) {
+        this.buildWebError();
       }
 
       if (this.addBookmarkConfirmVisible) {
@@ -108,7 +115,7 @@ export struct WebBrowserChrome {
             .fontColor(TEXT_PRIMARY)
             .placeholderColor(TEXT_SECONDARY)
             .backgroundColor('#00000000')
-            .padding(0)
+            .padding({ left: 0, right: 8 })
             .type(InputType.URL)
             .enterKeyType(EnterKeyType.Go)
             .onFocus(() => {
@@ -181,6 +188,26 @@ export struct WebBrowserChrome {
   }
 
   @Builder
+  private buildAddressSuggestionPanel() {
+    Row() {
+      WebAddressSuggestionPanel({
+        items: this.addressSuggestions,
+        onSelect: (item: WebAddressSuggestionItem): void => {
+          this.onSelectAddressSuggestion(item);
+        },
+        onDeleteHistory: (item: WebAddressSuggestionItem): void => {
+          this.onDeleteAddressSuggestionHistory(item);
+        }
+      })
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, bottom: 18 })
+    .position({ x: 0, y: this.toolbarHeight() + 8 })
+    .zIndex(25)
+  }
+
+  @Builder
   private buildIconButton(action: string, enabled: boolean) {
     Button() {
       if (action === 'forward') {
@@ -238,6 +265,7 @@ export struct WebBrowserChrome {
         .width(TOOLBAR_ICON_SIZE)
         .height(TOOLBAR_ICON_SIZE)
     }
+      .enabled(true)
       .type(ButtonType.Normal)
       .width(38)
       .height(40)
@@ -258,6 +286,7 @@ export struct WebBrowserChrome {
         .width(TOOLBAR_ICON_SIZE)
         .height(TOOLBAR_ICON_SIZE)
     }
+      .enabled(false)
       .type(ButtonType.Normal)
       .width(38)
       .height(40)
@@ -272,26 +301,11 @@ export struct WebBrowserChrome {
   }
 
   private canAddAddressBookmark(): boolean {
-    const url = this.addressText.trim();
-    if (!this.isHttpUrl(url)) {
-      return false;
-    }
-    const normalized = this.normalizeUrl(url);
-    for (let index = 0; index < this.bookmarkedUrls.length; index++) {
-      if (this.normalizeUrl(this.bookmarkedUrls[index]) === normalized) {
-        return false;
-      }
-    }
-    return true;
+    return this.canAddBookmark;
   }
 
-  private isHttpUrl(url: string): boolean {
-    const value = url.trim();
-    return value.startsWith('http://') || value.startsWith('https://');
-  }
-
-  private normalizeUrl(url: string): string {
-    return url.trim();
+  private showAddressSuggestionPanel(): boolean {
+    return this.showToolbar && !this.toolbarHidden && this.addressFocused && this.addressSuggestions.length > 0;
   }
 
   @Builder
@@ -315,31 +329,6 @@ export struct WebBrowserChrome {
     .opacity(this.pullRefreshVisible ? 1 : 0)
     .animation({ duration: 120, curve: Curve.EaseOut })
     .zIndex(18)
-  }
-
-  @Builder
-  private buildNotice() {
-    Row() {
-      Row() {
-        Text(this.notice)
-          .fontSize(13)
-          .fontColor(TEXT_PRIMARY)
-          .maxLines(2)
-          .layoutWeight(1)
-      }
-      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-      .backgroundColor(CARD_BACKGROUND)
-      .borderRadius(14)
-      .shadow({ radius: 18, color: '#24000000', offsetX: 0, offsetY: 8 })
-      .alignItems(VerticalAlign.Center)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16 })
-    .position({ x: 0, y: this.showToolbar && !this.toolbarHidden ? this.toolbarHeight() + 10 :
-      this.statusBarPadding() + 16 })
-    .animation({ duration: 180, curve: Curve.EaseInOut })
-    .zIndex(30)
   }
 
   @Builder
@@ -436,6 +425,21 @@ export struct WebBrowserChrome {
     .padding({ top: this.showToolbar && !this.toolbarHidden ? this.toolbarHeight() : this.statusBarPadding() })
     .backgroundColor(PAGE_BACKGROUND)
     .zIndex(10)
+    .gesture(
+      PanGesture({ direction: PanDirection.Vertical, distance: 1 })
+        .onActionStart(() => {
+          this.onWebErrorPullRefreshStart();
+        })
+        .onActionUpdate((event: GestureEvent) => {
+          this.onWebErrorPullRefreshUpdate(event.offsetY);
+        })
+        .onActionEnd(() => {
+          this.onWebErrorPullRefreshEnd();
+        })
+        .onActionCancel(() => {
+          this.onWebErrorPullRefreshEnd();
+        })
+    )
   }
 
   private toolbarHeight(): number {
@@ -444,6 +448,9 @@ export struct WebBrowserChrome {
 
   private chromeRootHeight(): Length {
     if (this.hasBlockingOverlay()) {
+      return '100%';
+    }
+    if (this.showAddressSuggestionPanel()) {
       return '100%';
     }
     if (!this.showToolbar) {

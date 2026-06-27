@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
+import { url } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 export interface TunnelConfig {
@@ -67,6 +68,12 @@ export interface WebPwaEntry {
   updatedAt: number;
 }
 
+export interface WebHistoryEntry {
+  url: string;
+  title: string;
+  updatedAt: number;
+}
+
 const STORE_NAME = 'wg_agent';
 const LOG_STORE_NAME = 'wg_agent_logs';
 const DOMAIN = 0x0001;
@@ -94,19 +101,23 @@ const SMART_AGENT_ENABLED_KEY = 'wg_smart_agent_enabled';
 const SMART_AGENT_RULES_KEY = 'wg_smart_agent_rules';
 const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
+const BROWSER_DOH_ENABLED_KEY = 'wg_browser_doh_enabled';
+const BROWSER_DOH_PROVIDER_KEY = 'wg_browser_doh_provider';
 const WEB_PINNED_URL_KEY = 'wg_web_pinned_url';
 const WEB_LAST_URL_KEY = 'wg_web_last_url';
 const WEB_SHORTCUT_URL_PREFIX = 'wg_web_shortcut_url_';
 const WEB_LAST_SHORTCUT_URL_KEY = 'wg_web_last_shortcut_url';
 const WEB_BOOKMARKS_KEY = 'wg_web_bookmarks';
 const WEB_PWA_ENTRIES_KEY = 'wg_web_pwa_entries';
+const WEB_HISTORY_KEY = 'wg_web_history';
 const LOG_ENTRIES_KEY = 'wg_log_entries';
 const LOG_CLEARED_AT_KEY = 'wg_log_cleared_at';
 const LAST_VPN_RESTORE_AT_KEY = 'wg_last_vpn_restore_at';
 const DATA_TRANSFER_NOTIFICATION_ID_KEY = 'wg_data_transfer_notification_id';
 const MAX_LOG_ENTRIES = 100;
+const MAX_WEB_HISTORY_ENTRIES = 80;
 export const DEFAULT_DOH_PROVIDER = 'https://dns.alidns.com/dns-query';
-export const DEFAULT_WEB_HOME_URL = 'https://www.bing.com';
+export const DEFAULT_WEB_HOME_URL = 'about:smart-bookmarks';
 
 export interface DohSettings {
   enabled: boolean;
@@ -131,14 +142,6 @@ export async function saveActiveTunnel(context: common.UIAbilityContext, tunnel:
   await store.put(ACTIVE_TUNNEL_ID_KEY, tunnel.id);
   await store.put(ACTIVE_TUNNEL_NAME_KEY, tunnel.name);
   await store.flush();
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'save active tunnel id=%{public}s name=%{public}s configBytes=%{public}d',
-    tunnel.id,
-    tunnel.name,
-    tunnel.configText.length
-  );
 }
 
 export async function clearActiveTunnel(context: StoreContext): Promise<void> {
@@ -153,11 +156,7 @@ export async function loadActiveTunnelInfo(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<ActiveTunnelInfo> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const configValue = await store.get(ACTIVE_CONFIG_KEY, '');
   const legacyValue = await store.get(LEGACY_CONFIG_KEY, '');
   const idValue = await store.get(ACTIVE_TUNNEL_ID_KEY, '');
@@ -170,22 +169,14 @@ export async function loadActiveTunnelInfo(
     name: nameValue as string,
     configText: configText
   };
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'load active tunnel id=%{public}s name=%{public}s activeBytes=%{public}d legacyBytes=%{public}d selectedBytes=%{public}d',
-    info.id,
-    info.name,
-    activeConfig.length,
-    legacyConfig.length,
-    info.configText.length
-  );
   return info;
 }
 
-export async function loadConfig(context: StoreContext): Promise<string> {
-  await removeStoreFromCache(context);
-  const store = await preferences.getPreferences(context, STORE_NAME);
+export async function loadConfig(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<string> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const activeValue = await store.get(ACTIVE_CONFIG_KEY, '');
   const activeConfig = activeValue as string;
   if (activeConfig.length > 0) {
@@ -220,6 +211,17 @@ export async function saveTunnelRuntimeStatus(context: StoreContext, status: Tun
   await store.put(STATUS_RTT_KEY, rttMillis);
   await store.put(STATUS_UPDATED_AT_KEY, updatedAt);
   await store.flush();
+  hilog.info(
+    DOMAIN,
+    TAG,
+    'save runtime status running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
+    String(running),
+    tunnelId,
+    tunnelName,
+    txBytes,
+    rxBytes,
+    updatedAt
+  );
 }
 
 export async function saveDataTransferNotificationId(context: StoreContext, notificationId: number): Promise<void> {
@@ -232,11 +234,7 @@ export async function loadDataTransferNotificationId(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<number> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return await store.get(DATA_TRANSFER_NOTIFICATION_ID_KEY, 0) as number;
 }
 
@@ -250,11 +248,7 @@ export async function loadTunnelRuntimeStatus(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<TunnelRuntimeStatus> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const status: TunnelRuntimeStatus = {
     running: await store.get(STATUS_RUNNING_KEY, false) as boolean,
     tunnelId: await store.get(STATUS_TUNNEL_ID_KEY, '') as string,
@@ -271,8 +265,7 @@ export async function loadTunnelRuntimeStatus(
 }
 
 export async function appendAgentLog(context: StoreContext, entry: AgentLogEntry): Promise<void> {
-  await removeLogStoreFromCache(context);
-  const store = await preferences.getPreferences(context, LOG_STORE_NAME);
+  const store = await getLogStoreForWrite(context);
   const entries = await loadAgentLogsFromLogStore(context, store);
   const normalizedEntry = normalizeAgentLogEntry(entry);
   const nextEntries: AgentLogEntry[] = [normalizedEntry];
@@ -291,27 +284,19 @@ export async function loadAgentLogs(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<AgentLogEntry[]> {
-  if (reloadFromDisk) {
-    await removeLogStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, LOG_STORE_NAME);
+  const store = await getLogStoreForLoad(context, reloadFromDisk);
   return await loadAgentLogsFromLogStore(context, store);
 }
 
 export async function clearAgentLogs(context: StoreContext): Promise<void> {
-  await removeLogStoreFromCache(context);
-  const logStore = await preferences.getPreferences(context, LOG_STORE_NAME);
+  const logStore = await getLogStoreForWrite(context);
   await logStore.put(LOG_CLEARED_AT_KEY, Date.now());
   await logStore.delete(LOG_ENTRIES_KEY);
   await logStore.flush();
-  await removeLogStoreFromCache(context);
 
-  await removeStoreFromCache(context);
-  const legacyStore = await preferences.getPreferences(context, STORE_NAME);
+  const legacyStore = await getMainStoreForWrite(context);
   await legacyStore.delete(LOG_ENTRIES_KEY);
   await legacyStore.flush();
-  await removeStoreFromCache(context);
 }
 
 export function buildVpnRestartLogEntry(tunnelName: string, createdAt: number = Date.now()): AgentLogEntry {
@@ -326,6 +311,25 @@ export function buildVpnRestartLogEntry(tunnelName: string, createdAt: number = 
   return entry;
 }
 
+export function buildSmartAgentSwitchLogEntry(
+  trigger: string,
+  fromTunnelName: string,
+  toTunnelName: string,
+  createdAt: number = Date.now()
+): AgentLogEntry {
+  const timestamp = numberValue(createdAt, Date.now());
+  const normalizedTime = timestamp <= 0 ? Date.now() : timestamp;
+  const normalizedFrom = normalizedLogTunnelName(fromTunnelName);
+  const normalizedTo = normalizedTargetName(toTunnelName);
+  const entry: AgentLogEntry = {
+    id: createAgentLogId('smart_agent_switch', normalizedTime),
+    title: '策略切换',
+    subtitle: '触发：' + normalizedTriggerReason(trigger) + '，' + normalizedFrom + ' -> ' + normalizedTo,
+    createdAt: normalizedTime
+  };
+  return entry;
+}
+
 export function createAgentRuleId(): string {
   return 'rule_' + String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
 }
@@ -334,11 +338,7 @@ export async function loadLastVpnRestoreAt(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<number> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return await store.get(LAST_VPN_RESTORE_AT_KEY, 0) as number;
 }
 
@@ -352,85 +352,76 @@ export async function saveAppSplitEnabled(context: StoreContext, enabled: boolea
   const store = await getMainStoreForWrite(context);
   await store.put(APP_SPLIT_ENABLED_KEY, enabled);
   await store.flush();
-  hilog.info(DOMAIN, TAG, 'save app split enabled=%{public}s', String(enabled));
 }
 
 export async function loadAppSplitEnabled(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<boolean> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
-  const enabled = await store.get(APP_SPLIT_ENABLED_KEY, false) as boolean;
-  hilog.info(DOMAIN, TAG, 'load app split enabled=%{public}s', String(enabled));
-  return enabled;
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  return await store.get(APP_SPLIT_ENABLED_KEY, false) as boolean;
 }
 
 export async function saveSelectedSplitApps(context: StoreContext, apps: SplitAppInfo[]): Promise<void> {
   const store = await getMainStoreForWrite(context);
   await store.put(APP_SPLIT_APPS_KEY, formatSplitAppList(apps));
   await store.flush();
-  hilog.info(DOMAIN, TAG, 'save selected split apps count=%{public}d', apps.length);
 }
 
 export async function loadSelectedSplitApps(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<SplitAppInfo[]> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const rawValue = await store.get(APP_SPLIT_APPS_KEY, '');
-  const apps = parseSplitAppList(rawValue as string);
-  hilog.info(DOMAIN, TAG, 'load selected split apps count=%{public}d', apps.length);
-  return apps;
+  return parseSplitAppList(rawValue as string);
 }
 
 export async function saveSmartAgentEnabled(context: StoreContext, enabled: boolean): Promise<void> {
   const store = await getMainStoreForWrite(context);
   await store.put(SMART_AGENT_ENABLED_KEY, enabled);
   await store.flush();
-  hilog.info(DOMAIN, TAG, 'save smart agent enabled=%{public}s', String(enabled));
 }
 
 export async function loadSmartAgentEnabled(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<boolean> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
-  const enabled = await store.get(SMART_AGENT_ENABLED_KEY, false) as boolean;
-  hilog.info(DOMAIN, TAG, 'load smart agent enabled=%{public}s', String(enabled));
-  return enabled;
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  return await store.get(SMART_AGENT_ENABLED_KEY, false) as boolean;
 }
 
 export async function saveAgentRules(context: StoreContext, rules: AgentRule[]): Promise<void> {
   const store = await getMainStoreForWrite(context);
-  await store.put(SMART_AGENT_RULES_KEY, formatAgentRuleList(rules));
+  const formattedRules = formatAgentRuleList(rules);
+  await store.put(SMART_AGENT_RULES_KEY, formattedRules);
   await store.flush();
-  hilog.info(DOMAIN, TAG, 'save smart agent rules count=%{public}d', rules.length);
+  hilog.info(
+    DOMAIN,
+    TAG,
+    'save smart agent rules count=%{public}d bytes=%{public}d summary=%{public}s',
+    rules.length,
+    formattedRules.length,
+    summarizeAgentRules(rules)
+  );
 }
 
 export async function loadAgentRules(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<AgentRule[]> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const rawValue = await store.get(SMART_AGENT_RULES_KEY, '');
   const rules = parseAgentRuleList(rawValue as string);
-  hilog.info(DOMAIN, TAG, 'load smart agent rules count=%{public}d', rules.length);
+  hilog.info(
+    DOMAIN,
+    TAG,
+    'load smart agent rules count=%{public}d bytes=%{public}d reload=%{public}s summary=%{public}s',
+    rules.length,
+    (rawValue as string).length,
+    String(reloadFromDisk),
+    summarizeAgentRules(rules)
+  );
   return rules;
 }
 
@@ -439,37 +430,44 @@ export async function saveDohSettings(context: StoreContext, settings: DohSettin
   await store.put(DOH_ENABLED_KEY, settings.enabled);
   await store.put(DOH_PROVIDER_KEY, normalizeDohProvider(settings.provider));
   await store.flush();
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'save doh settings enabled=%{public}s provider=%{public}s',
-    String(settings.enabled),
-    normalizeDohProvider(settings.provider)
-  );
 }
 
 export async function loadDohSettings(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<DohSettings> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const enabled = await store.get(DOH_ENABLED_KEY, true) as boolean;
   const provider = normalizeDohProvider(await store.get(DOH_PROVIDER_KEY, DEFAULT_DOH_PROVIDER) as string);
   const settings: DohSettings = {
     enabled: enabled,
     provider: provider
   };
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'load doh settings enabled=%{public}s provider=%{public}s',
-    String(settings.enabled),
-    settings.provider
+  return settings;
+}
+
+export async function saveBrowserDohSettings(context: StoreContext, settings: DohSettings): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(BROWSER_DOH_ENABLED_KEY, settings.enabled);
+  await store.put(BROWSER_DOH_PROVIDER_KEY, normalizeDohProvider(settings.provider));
+  await store.flush();
+}
+
+export async function loadBrowserDohSettings(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<DohSettings> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  const legacyEnabled = await store.get(DOH_ENABLED_KEY, true) as boolean;
+  const legacyProvider = normalizeDohProvider(await store.get(DOH_PROVIDER_KEY, DEFAULT_DOH_PROVIDER) as string);
+  const enabled = await store.get(BROWSER_DOH_ENABLED_KEY, legacyEnabled) as boolean;
+  const provider = normalizeDohProvider(
+    await store.get(BROWSER_DOH_PROVIDER_KEY, legacyProvider) as string
   );
+  const settings: DohSettings = {
+    enabled: enabled,
+    provider: provider
+  };
   return settings;
 }
 
@@ -484,11 +482,7 @@ export async function loadPinnedWebUrl(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<string> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return normalizeWebUrlForStore(await store.get(WEB_PINNED_URL_KEY, DEFAULT_WEB_HOME_URL) as string);
 }
 
@@ -544,11 +538,7 @@ export async function loadWebShortcutUrl(
     return '';
   }
 
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return normalizeWebUrlForStore(await store.get(WEB_SHORTCUT_URL_PREFIX + id, '') as string);
 }
 
@@ -564,11 +554,7 @@ export async function loadLastWebShortcutUrl(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<string> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return normalizeWebUrlForStore(await store.get(WEB_LAST_SHORTCUT_URL_KEY, '') as string);
 }
 
@@ -606,11 +592,7 @@ export async function loadWebBookmarks(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<WebBookmarkEntry[]> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   return parseWebBookmarks(await store.get(WEB_BOOKMARKS_KEY, '') as string);
 }
 
@@ -643,11 +625,7 @@ export async function loadWebPwaEntry(
   if (normalizedUrl.length === 0) {
     return undefined;
   }
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const entries = parseWebPwaEntries(await store.get(WEB_PWA_ENTRIES_KEY, '') as string);
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
@@ -657,6 +635,59 @@ export async function loadWebPwaEntry(
     }
   }
   return undefined;
+}
+
+export async function saveWebHistoryUrl(context: StoreContext, url: string, title: string = ''): Promise<void> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  const comparableUrl = normalizeWebHistoryComparableUrl(normalizedUrl);
+  if (comparableUrl.length === 0) {
+    return;
+  }
+
+  const store = await getMainStoreForWrite(context);
+  const entries = parseWebHistoryEntries(await store.get(WEB_HISTORY_KEY, '') as string);
+  const normalizedTitle = title.trim();
+  const next: WebHistoryEntry[] = [{
+    url: normalizedUrl,
+    title: normalizedTitle,
+    updatedAt: Date.now()
+  }];
+  for (let index = 0; index < entries.length && next.length < MAX_WEB_HISTORY_ENTRIES; index++) {
+    const entry = entries[index];
+    if (normalizeWebHistoryComparableUrl(entry.url) !== comparableUrl) {
+      next.push(entry);
+    }
+  }
+  await store.put(WEB_HISTORY_KEY, JSON.stringify(next));
+  await store.flush();
+}
+
+export async function loadWebHistory(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<WebHistoryEntry[]> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  return parseWebHistoryEntries(await store.get(WEB_HISTORY_KEY, '') as string);
+}
+
+export async function deleteWebHistoryUrl(context: StoreContext, url: string): Promise<void> {
+  const normalizedUrl = normalizeWebUrlForStore(url);
+  const comparableUrl = normalizeWebHistoryComparableUrl(normalizedUrl);
+  if (comparableUrl.length === 0) {
+    return;
+  }
+
+  const store = await getMainStoreForWrite(context);
+  const entries = parseWebHistoryEntries(await store.get(WEB_HISTORY_KEY, '') as string);
+  const next: WebHistoryEntry[] = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (normalizeWebHistoryComparableUrl(entry.url) !== comparableUrl) {
+      next.push(entry);
+    }
+  }
+  await store.put(WEB_HISTORY_KEY, JSON.stringify(next));
+  await store.flush();
 }
 
 export async function deleteWebBookmark(
@@ -695,11 +726,7 @@ export async function loadLastWebUrl(
   context: StoreContext,
   reloadFromDisk: boolean = false
 ): Promise<string> {
-  if (reloadFromDisk) {
-    await removeStoreFromCache(context);
-  }
-
-  const store = await preferences.getPreferences(context, STORE_NAME);
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const lastUrl = normalizeWebUrlForStore(await store.get(WEB_LAST_URL_KEY, '') as string);
   if (lastUrl.length > 0) {
     return lastUrl;
@@ -733,6 +760,25 @@ function normalizeDohProvider(value: string): string {
 
 function normalizeWebUrlForStore(value: string): string {
   return stringValue(value).trim();
+}
+
+function normalizeWebHistoryComparableUrl(value: string): string {
+  const normalized = normalizeWebUrlForStore(value);
+  if (!isWebBookmarkUrl(normalized)) {
+    return '';
+  }
+  try {
+    const parsed = url.URL.parseURL(normalized);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    if (parsed.hostname.trim().length === 0) {
+      return '';
+    }
+    return parsed.toString();
+  } catch (err) {
+    return normalized;
+  }
 }
 
 function normalizeShortcutId(value: string): string {
@@ -839,6 +885,40 @@ function parseWebPwaEntries(value: string): WebPwaEntry[] {
   }
 }
 
+function parseWebHistoryEntries(value: string): WebHistoryEntry[] {
+  try {
+    const parsed = JSON.parse(value) as WebHistoryEntry[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const result: WebHistoryEntry[] = [];
+    for (let index = 0; index < parsed.length; index++) {
+      const item = parsed[index] as WebHistoryEntry;
+      const normalizedUrl = normalizeWebUrlForStore(item.url);
+      const comparableUrl = normalizeWebHistoryComparableUrl(normalizedUrl);
+      if (comparableUrl.length === 0) {
+        continue;
+      }
+      if (result.some((entry: WebHistoryEntry) => {
+        return normalizeWebHistoryComparableUrl(entry.url) === comparableUrl;
+      })) {
+        continue;
+      }
+      result.push({
+        url: normalizedUrl,
+        title: stringValue(item.title).trim(),
+        updatedAt: typeof item.updatedAt === 'number' && !isNaN(item.updatedAt) ? item.updatedAt : 0
+      });
+      if (result.length >= MAX_WEB_HISTORY_ENTRIES) {
+        break;
+      }
+    }
+    return result;
+  } catch (err) {
+    return [];
+  }
+}
+
 function webBookmarkTitle(url: string): string {
   const marker = '://';
   const schemeIndex = url.indexOf(marker);
@@ -865,9 +945,11 @@ export function createTunnelId(): string {
   return 'tun_' + String(Date.now()) + '_' + String(Math.floor(Math.random() * 1000000));
 }
 
-export async function loadTunnels(context: common.UIAbilityContext): Promise<TunnelConfig[]> {
-  await removeStoreFromCache(context);
-  const store = await preferences.getPreferences(context, STORE_NAME);
+export async function loadTunnels(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<TunnelConfig[]> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
   const idsValue = await store.get(TUNNEL_IDS_KEY, '');
   const ids = parseIdList(idsValue as string);
   if (ids.length === 0) {
@@ -926,8 +1008,52 @@ export async function deleteTunnel(context: common.UIAbilityContext, tunnelId: s
 }
 
 async function getMainStoreForWrite(context: StoreContext): Promise<preferences.Preferences> {
-  await removeStoreFromCache(context);
+  // UIAbility and VpnExtensionAbility both mutate the same preferences file.
+  // Reload before writes so a stale cached instance does not flush older values
+  // back to disk and overwrite recently saved settings from the other context.
+  return await reloadMainStore(context);
+}
+
+async function getMainStoreForLoad(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<preferences.Preferences> {
+  if (reloadFromDisk) {
+    return await reloadMainStore(context);
+  }
+  return await getMainStore(context);
+}
+
+async function getLogStoreForLoad(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<preferences.Preferences> {
+  if (reloadFromDisk) {
+    return await reloadLogStore(context);
+  }
+  return await getLogStore(context);
+}
+
+async function getLogStoreForWrite(context: StoreContext): Promise<preferences.Preferences> {
+  return await reloadLogStore(context);
+}
+
+async function getMainStore(context: StoreContext): Promise<preferences.Preferences> {
   return await preferences.getPreferences(context, STORE_NAME);
+}
+
+async function getLogStore(context: StoreContext): Promise<preferences.Preferences> {
+  return await preferences.getPreferences(context, LOG_STORE_NAME);
+}
+
+async function reloadMainStore(context: StoreContext): Promise<preferences.Preferences> {
+  await removeStoreFromCache(context);
+  return await getMainStore(context);
+}
+
+async function reloadLogStore(context: StoreContext): Promise<preferences.Preferences> {
+  await removeLogStoreFromCache(context);
+  return await getLogStore(context);
 }
 
 function parseIdList(rawValue: string): string[] {
@@ -1071,6 +1197,44 @@ function normalizeAgentRuleType(value: string): AgentRuleType {
   return 'wifiGateway';
 }
 
+function summarizeAgentRules(rules: AgentRule[]): string {
+  if (rules.length === 0) {
+    return '<empty>';
+  }
+
+  const parts: string[] = [];
+  for (let index = 0; index < rules.length; index++) {
+    const rule = normalizeAgentRule(rules[index]);
+    parts.push(
+      shortRuleId(rule.id) + ':' +
+      rule.type + ':' +
+      shortRuleValue(rule.matchValue) + ':' +
+      shortRuleValue(rule.targetTunnelId.length > 0 ? rule.targetTunnelId : 'direct') + ':' +
+      (rule.enabled ? 'on' : 'off')
+    );
+  }
+  return parts.join('|');
+}
+
+function shortRuleId(ruleId: string): string {
+  const normalized = stringValue(ruleId);
+  if (normalized.length <= 8) {
+    return normalized;
+  }
+  return normalized.substring(normalized.length - 8);
+}
+
+function shortRuleValue(value: string): string {
+  const normalized = stringValue(value).trim();
+  if (normalized.length === 0) {
+    return '-';
+  }
+  if (normalized.length <= 24) {
+    return normalized;
+  }
+  return normalized.substring(0, 24) + '...';
+}
+
 async function loadAgentLogsFromStore(store: preferences.Preferences): Promise<AgentLogEntry[]> {
   const rawValue = await store.get(LOG_ENTRIES_KEY, '');
   return parseAgentLogList(rawValue as string);
@@ -1086,8 +1250,7 @@ async function loadAgentLogsFromLogStore(
     return entries;
   }
 
-  await removeStoreFromCache(context);
-  const legacyStore = await preferences.getPreferences(context, STORE_NAME);
+  const legacyStore = await getMainStore(context);
   return await loadAgentLogsFromStore(legacyStore);
 }
 
@@ -1164,6 +1327,22 @@ function normalizedLogTunnelName(tunnelName: string): string {
     return normalized;
   }
   return '未知隧道';
+}
+
+function normalizedTargetName(tunnelName: string): string {
+  const normalized = tunnelName.trim();
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return '直连';
+}
+
+function normalizedTriggerReason(trigger: string): string {
+  const normalized = trigger.trim();
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return '网络变化';
 }
 
 async function saveTunnelToStore(store: preferences.Preferences, tunnel: TunnelConfig, ids: string[]): Promise<void> {

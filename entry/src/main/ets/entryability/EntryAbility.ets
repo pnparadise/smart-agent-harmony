@@ -6,13 +6,12 @@ import { window } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import {
   loadActiveTunnelInfo,
-  loadLastVpnRestoreAt,
-  saveLastVpnRestoreAt,
   loadTunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
 import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { syncWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
 import { activateImmersiveWindow, configureImmersiveWindow } from './ImmersiveWindow';
+import { notifyWebBrowserBackgroundForPictureInPicture } from './WebBrowserPictureInPictureEvents';
 
 const DOMAIN = 0x0001;
 const TAG = 'EntryAbility';
@@ -20,10 +19,9 @@ const BUNDLE_NAME = 'com.smart.agent';
 const MODULE_NAME = 'entry';
 const VPN_ABILITY = 'WgVpnExtensionAbility';
 const VPN_ACTION_RESTORE = 'restore';
-const VPN_RESTORE_DEBOUNCE_MS = 2000;
+const VPN_RUNTIME_ALIVE_MAX_AGE_MS = 10000;
 
 export default class EntryAbility extends UIAbility {
-  private lastVpnRestoreAt: number = 0;
   private vpnRestoreInFlight: boolean = false;
   private windowStage?: window.WindowStage;
 
@@ -79,6 +77,7 @@ export default class EntryAbility extends UIAbility {
 
   onBackground(): void {
     hilog.info(DOMAIN, TAG, 'onBackground');
+    notifyWebBrowserBackgroundForPictureInPicture();
     this.startVpnBackgroundTaskIfNeeded().catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'start vpn background task failed: %{public}s', this.formatError(err));
     });
@@ -124,13 +123,6 @@ export default class EntryAbility extends UIAbility {
   }
 
   private async doRestoreVpnIfNeeded(reason: string): Promise<void> {
-    const now = Date.now();
-    const lastRestoreAt = Math.max(this.lastVpnRestoreAt, await loadLastVpnRestoreAt(this.context, true));
-    if (now - lastRestoreAt < VPN_RESTORE_DEBOUNCE_MS) {
-      hilog.info(DOMAIN, TAG, 'skip vpn restore reason=%{public}s, debounce active', reason);
-      return;
-    }
-
     const activeInfo = await loadActiveTunnelInfo(this.context, true);
     const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
     if (!hasActiveTunnel) {
@@ -138,8 +130,18 @@ export default class EntryAbility extends UIAbility {
       return;
     }
 
-    this.lastVpnRestoreAt = now;
-    await saveLastVpnRestoreAt(this.context, now);
+    const runtimeStatus = await loadTunnelRuntimeStatus(this.context, true);
+    if (this.isRuntimeStatusAlive(runtimeStatus.running, runtimeStatus.updatedAt)) {
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'skip vpn restore reason=%{public}s, runtime alive tunnelId=%{public}s',
+        reason,
+        runtimeStatus.tunnelId
+      );
+      return;
+    }
+
     await startVpnDataTransferTask(this.context);
     await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
     hilog.info(
@@ -150,6 +152,13 @@ export default class EntryAbility extends UIAbility {
       activeInfo.id,
       activeInfo.name
     );
+  }
+
+  private isRuntimeStatusAlive(running: boolean, updatedAt: number): boolean {
+    if (!running || updatedAt <= 0) {
+      return false;
+    }
+    return Date.now() - updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;
   }
 
   private buildVpnWant(): Want {

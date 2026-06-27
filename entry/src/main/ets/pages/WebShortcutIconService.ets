@@ -125,7 +125,7 @@ export class WebShortcutIconService {
       }
 
       // 3. 顺位降级：若网络下载失败或不优先使用网络，直接采用 favor (favicon PixelMap)
-      if (favicon !== undefined) {
+      if (favicon !== undefined && this.isSameBrowserPageUrl(url, faviconUrl)) {
         await this.writePixelMapToPng(favicon, foregroundIcon);
         return { foregroundIcon: foregroundIcon };
       }
@@ -146,11 +146,8 @@ export class WebShortcutIconService {
 
   foregroundIconFileSource(url: string): string {
     const path = this.foregroundIconPath(url);
-    try {
-      if (fileIo.accessSync(path)) {
-        return 'file://' + path;
-      }
-    } catch (err) {
+    if (this.fileExists(path)) {
+      return 'file://' + path;
     }
     return '';
   }
@@ -207,10 +204,27 @@ export class WebShortcutIconService {
 
   private fileExists(path: string): boolean {
     try {
-      return fileIo.accessSync(path);
+      if (!fileIo.accessSync(path)) {
+        return false;
+      }
+      const stat = fileIo.statSync(path);
+      return stat.size > 0;
     } catch (err) {
       return false;
     }
+  }
+
+  private isSameBrowserPageUrl(left: string, right: string): boolean {
+    return this.normalizeBrowserPageUrl(left) === this.normalizeBrowserPageUrl(right);
+  }
+
+  private normalizeBrowserPageUrl(value: string): string {
+    const input = value.trim();
+    if (input.startsWith('http://') || input.startsWith('https://') ||
+      input.startsWith('file://') || input.startsWith('resource://') || input.startsWith('about:')) {
+      return input;
+    }
+    return '';
   }
 
   private async writeBestWebIcon(
@@ -504,11 +518,8 @@ export class WebShortcutIconService {
   }
 
   private async ensureDefaultShortcutIcon(path: string): Promise<void> {
-    try {
-      if (fileIo.accessSync(path)) {
-        return;
-      }
-    } catch (err) {
+    if (this.fileExists(path)) {
+      return;
     }
 
     const colors = new ArrayBuffer(SHORTCUT_ICON_SIZE * SHORTCUT_ICON_SIZE * 4);

@@ -50,6 +50,10 @@ export interface WebViewSurfacePullGestureEvent {
   offsetY: number;
 }
 
+export interface WebViewSurfaceExternalNavigationEvent {
+  url: string;
+}
+
 export interface WebViewSurfaceScrollEvent {
   xOffset: number;
   yOffset: number;
@@ -91,7 +95,7 @@ class WebViewSurfaceNativeMediaPlayerConfig implements NativeMediaPlayerConfig {
 
 @Component
 export struct WebViewSurface {
-  @Prop @Watch('onSrcChanged') src: string = '';
+  @Prop src: string = '';
   controller: webview.WebviewController = new webview.WebviewController();
   onControllerAttached: () => void = () => {};
   onPageBegin: (event: WebViewSurfacePageEvent) => void = () => {};
@@ -107,13 +111,14 @@ export struct WebViewSurface {
   onPullGestureStart: () => void = () => {};
   onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent) => void = () => {};
   onPullGestureEnd: () => void = () => {};
+  onExternalNavigation: (event: WebViewSurfaceExternalNavigationEvent) => void = () => {};
   onFullScreenEnter: (event: WebViewSurfaceFullScreenEvent) => void = () => {};
   onFullScreenExit: () => void = () => {};
   onLoadError: (event: WebViewSurfaceLoadErrorEvent) => void = () => {};
   private controllerAttached: boolean = false;
 
   build() {
-    Web({ src: '', controller: this.controller })
+    Web({ src: this.src, controller: this.controller })
       .width('100%')
       .height('100%')
       .javaScriptAccess(true)
@@ -128,8 +133,8 @@ export struct WebViewSurface {
       .enableNativeMediaPlayer(new WebViewSurfaceNativeMediaPlayerConfig())
       .onControllerAttached(() => {
         this.controllerAttached = true;
+        hilog.info(DOMAIN, TAG, 'controller attached src=%{public}s', this.src);
         this.onControllerAttached();
-        this.loadCurrentSrc();
       })
       .onPageBegin((event) => {
         this.onPageBegin({ url: event && event.url.length > 0 ? event.url : '' });
@@ -175,10 +180,14 @@ export struct WebViewSurface {
         if (!event || !event.request.isMainFrame()) {
           return;
         }
+        const responseCode = event.response.getResponseCode();
+        if (responseCode < 400) {
+          return;
+        }
         this.onLoadError({
           url: event.request.getRequestUrl(),
           isMainFrame: true,
-          code: event.response.getResponseCode(),
+          code: responseCode,
           message: event.response.getReasonMessage(),
           kind: 'http'
         });
@@ -194,6 +203,57 @@ export struct WebViewSurface {
           message: event.error.getErrorInfo(),
           kind: 'network'
         });
+      })
+      .onSslErrorEventReceive((event) => {
+        if (!event) {
+          return;
+        }
+        try {
+          event.handler.handleCancel();
+        } catch (err) {
+        }
+        this.onLoadError({
+          url: this.currentUrl(),
+          isMainFrame: true,
+          code: 0,
+          message: 'SSL error',
+          kind: 'ssl'
+        });
+      })
+      .onRenderProcessNotResponding((event) => {
+        this.onLoadError({
+          url: this.currentUrl(),
+          isMainFrame: true,
+          code: 0,
+          message: event ? ('render process not responding pid=' + String(event.pid ?? 0)) : 'render process not responding',
+          kind: 'render-process'
+        });
+      })
+      .onLoadIntercept((event) => {
+        if (!event || !event.data || !event.data.isMainFrame()) {
+          return false;
+        }
+        const requestUrl = event.data.getRequestUrl();
+        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
+          requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
+          return false;
+        }
+        hilog.info(DOMAIN, TAG, 'intercept external navigation by load intercept url=%{public}s', requestUrl);
+        this.onExternalNavigation({ url: requestUrl });
+        return true;
+      })
+      .onOverrideUrlLoading((event: WebResourceRequest) => {
+        if (!event) {
+          return false;
+        }
+        const requestUrl = event.getRequestUrl();
+        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
+          requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
+          return false;
+        }
+        hilog.info(DOMAIN, TAG, 'intercept external scheme navigation url=%{public}s', requestUrl);
+        this.onExternalNavigation({ url: requestUrl });
+        return true;
       })
       .onIntelligentTrackingPreventionResult((event) => {
         this.onTrackerBlocked(event ? event.host ?? '' : '');
@@ -309,17 +369,6 @@ export struct WebViewSurface {
     } catch (err) {
       return '';
     }
-  }
-
-  private onSrcChanged(): void {
-    this.loadCurrentSrc();
-  }
-
-  private loadCurrentSrc(): void {
-    if (!this.controllerAttached || this.src.length === 0) {
-      return;
-    }
-    this.loadUrl(this.src);
   }
 
   private formatError(err: Object): string {

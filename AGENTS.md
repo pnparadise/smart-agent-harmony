@@ -21,6 +21,12 @@ Use the existing ArkTS style: two-space indentation, explicit types on function 
 
 ArkTS limited throw rule: do not write `throw err` or rethrow arbitrary caught values. Convert caught values to `BusinessError` or a message and throw `new Error(...)` or another explicitly allowed error type.
 
+ArkTS type strictness rules:
+
+- Do not use inline object literal shapes as return types, parameter types, or local type declarations. Declare an explicit `interface` or `class` first, then reference that named type.
+- Do not return or assign untyped object literals when ArkTS expects a declared structured type. Give the target variable or return value an explicit interface/class type such as `const result: XxxResult = { ... }`.
+- For parsed JSON, prefer a dedicated `interface` like `XxxRaw` plus a normalized typed result like `XxxResult` instead of `Record<string, Object>` and anonymous object structures.
+
 ## Testing Guidelines
 
 There is no dedicated automated test suite in this repository yet. In WSL, validate with source review and native-library rebuilds where relevant; HAP validation requires the `/sdk/ohos-sdk` setup or another HarmonyOS SDK-equipped environment. For VPN changes, verify wg-quick parsing, tunnel start/stop, DNS/routes, and socket protection. For browser/bookmark changes, test fresh install and persisted-state flows.

@@ -16,7 +16,8 @@ const MODULE_NAME = 'entry';
 const ENTRY_ABILITY = 'EntryAbility';
 const DATA_TRANSFER_MODE = 'dataTransfer';
 const LIVE_VIEW_TYPE_CODE_DATA_TRANSFER = 8;
-const DATA_TRANSFER_PROGRESS_MAX = 100;
+const CLOCK_PROGRESS_TOTAL_SECONDS = 60;
+const SYSTEM_PROGRESS_MAX = 100;
 
 let vpnDataTransferTaskStarted = false;
 let cachedDataTransferNotificationId = 0;
@@ -33,13 +34,11 @@ export async function startVpnDataTransferTask(context: common.UIAbilityContext)
     await saveDataTransferNotificationId(context, notification.notificationId);
     vpnDataTransferTaskStarted = true;
     await updateVpnDataTransferNotification(context, '', 0, 0);
-    hilog.info(DOMAIN, TAG, 'dataTransfer continuous task started');
   } catch (err) {
     const error = err as BusinessError;
     if (await hasContinuousTask(context)) {
       vpnDataTransferTaskStarted = true;
       await syncExistingDataTransferNotificationId(context);
-      hilog.info(DOMAIN, TAG, 'dataTransfer continuous task already active after start attempt: %{public}s', formatError(error));
       return;
     }
     vpnDataTransferTaskStarted = false;
@@ -52,14 +51,12 @@ export async function startVpnDataTransferTask(context: common.UIAbilityContext)
 export async function stopVpnDataTransferTask(context: common.UIAbilityContext): Promise<void> {
   try {
     if (!vpnDataTransferTaskStarted && !await hasContinuousTask(context)) {
-      hilog.info(DOMAIN, TAG, 'dataTransfer continuous task not active');
       return;
     }
     await backgroundTaskManager.stopBackgroundRunning(context);
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
-    hilog.info(DOMAIN, TAG, 'dataTransfer continuous task stopped');
   } catch (err) {
     const error = err as BusinessError;
     vpnDataTransferTaskStarted = false;
@@ -80,7 +77,6 @@ export async function updateVpnDataTransferNotification(
     return;
   }
 
-  const totalBytes = Math.max(0, txBytes) + Math.max(0, rxBytes);
   const title = tunnelName.length > 0 ? 'SmartAgent - ' + tunnelName : 'SmartAgent VPN';
   const text = '↑ ' + formatBytes(txBytes) + '  ↓ ' + formatBytes(rxBytes);
   const request: notificationManager.NotificationRequest = {
@@ -99,7 +95,7 @@ export async function updateVpnDataTransferNotification(
       data: {
         title: title,
         fileName: text,
-        progressValue: progressValueForBytes(totalBytes)
+        progressValue: progressValueForCurrentSecond()
       }
     }
   };
@@ -188,11 +184,12 @@ function formatDecimal(value: number): string {
   return value >= 100 ? value.toFixed(0) : value.toFixed(1);
 }
 
-function progressValueForBytes(totalBytes: number): number {
-  if (totalBytes <= 0) {
-    return 0;
-  }
-  return Math.max(1, totalBytes % DATA_TRANSFER_PROGRESS_MAX);
+function progressValueForCurrentSecond(): number {
+  const seconds = new Date().getSeconds();
+  return Math.min(
+    SYSTEM_PROGRESS_MAX,
+    Math.floor((seconds / CLOCK_PROGRESS_TOTAL_SECONDS) * SYSTEM_PROGRESS_MAX)
+  );
 }
 
 function formatError(error: BusinessError): string {

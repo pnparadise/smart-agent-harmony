@@ -56,8 +56,9 @@ export class WebPullRefresh {
 
   static update(pullRefresh: PullRefreshState, deltaFromStart: number): void {
     const distance = Math.min(Math.max(0, deltaFromStart - PULL_REFRESH_START_THRESHOLD), PULL_REFRESH_MAX_DISTANCE);
+    const wasVisible = pullRefresh.visible;
     pullRefresh.distance = distance;
-    pullRefresh.visible = distance > 6;
+    pullRefresh.visible = distance > 6 || (wasVisible && pullRefresh.tracking && distance > 0);
     pullRefresh.ready = pullRefresh.ready || distance >= TOUCH_REFRESH_DISTANCE;
   }
 

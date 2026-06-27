@@ -284,4 +284,5 @@ export class WebBrowserStateStore {
     }
     return result;
   }
+
 }

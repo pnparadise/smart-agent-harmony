@@ -6,13 +6,13 @@ import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
-  ActiveTunnelInfo,
   AgentLogEntry,
   AgentRule,
   clearAgentLogs,
   clearActiveTunnel,
   createAgentRuleId,
   createTunnelId,
+  loadBrowserDohSettings,
   deleteTunnel,
   DEFAULT_DOH_PROVIDER,
   loadAgentRules,
@@ -27,6 +27,7 @@ import {
   saveAgentRules,
   saveActiveTunnel,
   saveAppSplitEnabled,
+  saveBrowserDohSettings,
   saveDohSettings,
   saveSelectedSplitApps,
   saveSmartAgentEnabled,
@@ -57,13 +58,14 @@ import { TunnelsPage } from './TunnelsPage';
 const BUNDLE_NAME = 'com.smart.agent';
 const MODULE_NAME = 'entry';
 const VPN_ABILITY = 'WgVpnExtensionAbility';
-const VPN_ACTION_REFRESH_STATUS = 'refreshStatus';
+const VPN_ACTION_RESTORE = 'restore';
 const CONFIG_FILE_SUFFIX_FILTERS: string[] = ['WireGuard|.conf,.txt'];
 const ISSUE_REPORT_URL = 'https://github.com/pnparadise/smart-agent-harmony';
 const MAX_IMPORT_CONFIG_BYTES = 64 * 1024;
 const STATUS_REFRESH_INTERVAL_MS = 3000;
 const STARTUP_GRACE_MS = 15000;
 const RUNTIME_STOP_GRACE_MS = 15000;
+const VPN_RUNTIME_ALIVE_MAX_AGE_MS = 10000;
 const TAB_TUNNELS = 0;
 const TAB_RULES = 1;
 const TAB_LOGS = 2;
@@ -123,6 +125,8 @@ struct Index {
   @State private agentRules: AgentRule[] = [];
   @State private dohEnabled: boolean = true;
   @State private dohProvider: string = DEFAULT_DOH_PROVIDER;
+  @State private browserDohEnabled: boolean = true;
+  @State private browserDohProvider: string = DEFAULT_DOH_PROVIDER;
   @State private selectedSplitApps: SplitAppInfo[] = [];
   @State private appPickerOpen: boolean = false;
   @State private availableSplitApps: SplitAppInfo[] = [];
@@ -138,6 +142,12 @@ struct Index {
   @State private highlightedTabIndex: number = TAB_TUNNELS;
   private statusRefreshTimer: number = -1;
   private runtimeConfirmedRunning: boolean = false;
+  private tunnelLoadVersion: number = 0;
+  private appSplitLoadVersion: number = 0;
+  private smartAgentLoadVersion: number = 0;
+  private dohLoadVersion: number = 0;
+  private browserDohLoadVersion: number = 0;
+  private logsLoadVersion: number = 0;
 
   aboutToAppear(): void {
     hilog.info(DOMAIN, TAG, 'aboutToAppear');
@@ -145,8 +155,16 @@ struct Index {
     this.loadAppSplitSettings();
     this.loadSmartAgentSettings();
     this.loadDohSettings();
-    this.loadLogs();
+    this.loadBrowserDohSettings();
+    if (this.currentTabIndex === TAB_LOGS) {
+      this.loadLogs();
+    }
     this.refreshRuntimeStatus();
+    if (this.currentTabIndex === TAB_TUNNELS) {
+      this.ensureActiveTunnelRunningOnVpnHome('aboutToAppear').catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'vpn home ensure running failed: %{public}s', err.message ?? JSON.stringify(err));
+      });
+    }
     this.startStatusRefresh();
   }
 
@@ -242,22 +260,24 @@ struct Index {
       .layoutWeight(1)
       .alignItems(VerticalAlign.Center)
 
-      Button() {
-        Image($r('app.media.ic_delete_blue'))
-          .width(22)
-          .height(22)
+      if (this.isSavedEditingTunnel()) {
+        Button() {
+          Image($r('app.media.ic_delete_blue'))
+            .width(22)
+            .height(22)
+        }
+          .enabled(!this.busy && !this.isEditingActiveTunnel())
+          .type(ButtonType.Normal)
+          .width(44)
+          .height(44)
+          .backgroundColor(ACTION_BUTTON_BACKGROUND)
+          .borderRadius(ACTION_BUTTON_RADIUS)
+          .borderWidth(0)
+          .margin({ left: 8 })
+          .onClick(() => {
+            this.deleteTunnelById(this.editingTunnelId);
+          })
       }
-        .enabled(!this.busy && !this.isEditingActiveTunnel())
-        .type(ButtonType.Normal)
-        .width(44)
-        .height(44)
-        .backgroundColor(ACTION_BUTTON_BACKGROUND)
-        .borderRadius(ACTION_BUTTON_RADIUS)
-        .borderWidth(0)
-        .margin({ left: 8 })
-        .onClick(() => {
-          this.deleteTunnelById(this.editingTunnelId);
-        })
 
       Button() {
         Image($r('app.media.ic_check_blue'))
@@ -394,6 +414,9 @@ struct Index {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
+            onCreateTunnel: () => {
+              this.createNewTunnelDraft();
+            },
             onOpenTunnel: (tunnel: TunnelConfig) => {
               this.openTunnel(tunnel);
             },
@@ -415,6 +438,8 @@ struct Index {
             tunnels: this.tunnels,
             dohEnabled: this.dohEnabled,
             dohProvider: this.dohProvider,
+            browserDohEnabled: this.browserDohEnabled,
+            browserDohProvider: this.browserDohProvider,
             selectedSplitAppCount: this.selectedSplitApps.length,
             onToggleAppSplit: () => {
               this.toggleAppSplit().catch((err: BusinessError) => {
@@ -427,8 +452,9 @@ struct Index {
               });
             },
             onSaveAgentRule: (rule: AgentRule) => {
-              this.saveAgentRuleFromPage(rule).catch((err: BusinessError) => {
+              return this.saveAgentRuleFromPage(rule).catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
+                throw new Error(err.message ?? JSON.stringify(err));
               });
             },
             onDeleteAgentRule: (ruleId: string) => {
@@ -448,6 +474,16 @@ struct Index {
             },
             onSelectDohProvider: (provider: string) => {
               this.selectDohProvider(provider).catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onToggleBrowserDoh: () => {
+              this.toggleBrowserDohEnabled().catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onSelectBrowserDohProvider: (provider: string) => {
+              this.selectBrowserDohProvider(provider).catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
@@ -553,13 +589,21 @@ struct Index {
   }
 
   private async loadTunnelList(): Promise<void> {
+    const loadVersion = ++this.tunnelLoadVersion;
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      this.tunnels = await loadTunnels(context);
-      if (this.tunnels.length === 0) {
+      const tunnels = await loadTunnels(context);
+      if (loadVersion !== this.tunnelLoadVersion) {
+        return;
+      }
+      this.tunnels = tunnels;
+      if (tunnels.length === 0) {
         this.statusText = 'No tunnels';
       }
     } catch (err) {
+      if (loadVersion !== this.tunnelLoadVersion) {
+        return;
+      }
       const error = err as BusinessError;
       this.statusText = error.message ?? JSON.stringify(err);
     }
@@ -569,6 +613,12 @@ struct Index {
     this.editingTunnelId = tunnel.id;
     this.editingName = tunnel.name;
     this.editingConfig = tunnel.configText;
+  }
+
+  private createNewTunnelDraft(): void {
+    this.editingTunnelId = createTunnelId();
+    this.editingName = '';
+    this.editingConfig = DEFAULT_WG_CONFIG;
   }
 
   private closeEditor(): void {
@@ -592,40 +642,85 @@ struct Index {
   }
 
   private async loadAppSplitSettings(): Promise<void> {
+    const loadVersion = ++this.appSplitLoadVersion;
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      this.appSplitEnabled = await loadAppSplitEnabled(context, true);
-      this.selectedSplitApps = await loadSelectedSplitApps(context, true);
+      const appSplitEnabled = await loadAppSplitEnabled(context, true);
+      const selectedSplitApps = await loadSelectedSplitApps(context, true);
+      if (loadVersion !== this.appSplitLoadVersion) {
+        return;
+      }
+      this.appSplitEnabled = appSplitEnabled;
+      this.selectedSplitApps = selectedSplitApps;
     } catch (err) {
+      if (loadVersion !== this.appSplitLoadVersion) {
+        return;
+      }
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'load app split settings failed: %{public}s', error.message ?? JSON.stringify(err));
     }
   }
 
   private async loadSmartAgentSettings(): Promise<void> {
+    const loadVersion = ++this.smartAgentLoadVersion;
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      this.smartAgentEnabled = await loadSmartAgentEnabled(context, true);
-      this.agentRules = await loadAgentRules(context, true);
+      const smartAgentEnabled = await loadSmartAgentEnabled(context, true);
+      const agentRules = await loadAgentRules(context, true);
+      if (loadVersion !== this.smartAgentLoadVersion) {
+        return;
+      }
+      this.smartAgentEnabled = smartAgentEnabled;
+      this.agentRules = agentRules;
     } catch (err) {
+      if (loadVersion !== this.smartAgentLoadVersion) {
+        return;
+      }
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'load smart agent settings failed: %{public}s', error.message ?? JSON.stringify(err));
     }
   }
 
   private async loadDohSettings(): Promise<void> {
+    const loadVersion = ++this.dohLoadVersion;
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const settings = await loadDohSettings(context, true);
+      if (loadVersion !== this.dohLoadVersion) {
+        return;
+      }
       this.dohEnabled = settings.enabled;
       this.dohProvider = settings.provider;
     } catch (err) {
+      if (loadVersion !== this.dohLoadVersion) {
+        return;
+      }
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'load doh settings failed: %{public}s', error.message ?? JSON.stringify(err));
     }
   }
 
+  private async loadBrowserDohSettings(): Promise<void> {
+    const loadVersion = ++this.browserDohLoadVersion;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const settings = await loadBrowserDohSettings(context, true);
+      if (loadVersion !== this.browserDohLoadVersion) {
+        return;
+      }
+      this.browserDohEnabled = settings.enabled;
+      this.browserDohProvider = settings.provider;
+    } catch (err) {
+      if (loadVersion !== this.browserDohLoadVersion) {
+        return;
+      }
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load browser doh settings failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
   private async toggleSmartAgent(): Promise<void> {
+    this.smartAgentLoadVersion++;
     const nextEnabled = !this.smartAgentEnabled;
     this.smartAgentEnabled = nextEnabled;
     const context = getContext(this) as common.UIAbilityContext;
@@ -634,6 +729,7 @@ struct Index {
   }
 
   private async saveAgentRuleFromPage(rule: AgentRule): Promise<void> {
+    this.smartAgentLoadVersion++;
     const normalizedRule = this.normalizeAgentRuleForSave(rule);
     if (normalizedRule.targetTunnelId.length > 0) {
       normalizedRule.targetTunnelName = this.resolveTunnelName(normalizedRule.targetTunnelId, normalizedRule.targetTunnelName);
@@ -655,12 +751,42 @@ struct Index {
     }
 
     const context = getContext(this) as common.UIAbilityContext;
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'saveAgentRuleFromPage begin rule=%{public}s existing=%{public}s next=%{public}s',
+      this.describeAgentRule(normalizedRule),
+      this.describeAgentRules(this.agentRules),
+      this.describeAgentRules(nextRules)
+    );
     await saveAgentRules(context, nextRules);
-    this.agentRules = nextRules;
-    await this.refreshVpnStatusForIndependentSettings('smart agent rules');
+    const persistedRules = await loadAgentRules(context, true);
+    const persistedRule = this.findAgentRuleById(persistedRules, normalizedRule.id);
+    this.agentRules = persistedRules;
+    if (persistedRule === undefined || !this.sameAgentRuleValue(persistedRule, normalizedRule)) {
+      hilog.warn(
+        DOMAIN,
+        TAG,
+        'saveAgentRuleFromPage verification failed expected=%{public}s persisted=%{public}s persistedList=%{public}s',
+        this.describeAgentRule(normalizedRule),
+        this.describeAgentRuleOrMissing(persistedRule),
+        this.describeAgentRules(persistedRules)
+      );
+      throw new Error('rule save verification failed');
+    }
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'saveAgentRuleFromPage verified rule=%{public}s persistedList=%{public}s',
+      this.describeAgentRule(persistedRule),
+      this.describeAgentRules(persistedRules)
+    );
+    this.statusText = 'Rules updated';
+    this.refreshIndependentSettingsInBackground('smart agent rules');
   }
 
   private async deleteAgentRuleFromPage(ruleId: string): Promise<void> {
+    this.smartAgentLoadVersion++;
     const nextRules: AgentRule[] = [];
     for (let index = 0; index < this.agentRules.length; index++) {
       const rule = this.agentRules[index];
@@ -672,10 +798,12 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
     this.agentRules = nextRules;
-    await this.refreshVpnStatusForIndependentSettings('smart agent rules');
+    this.statusText = 'Rules updated';
+    this.refreshIndependentSettingsInBackground('smart agent rules');
   }
 
   private async reorderAgentRuleFromPage(ruleId: string, targetIndex: number): Promise<void> {
+    this.smartAgentLoadVersion++;
     const currentIndex = this.indexOfAgentRule(ruleId);
     if (currentIndex < 0) {
       return;
@@ -712,10 +840,12 @@ struct Index {
     this.agentRules = nextRules;
     const context = getContext(this) as common.UIAbilityContext;
     await saveAgentRules(context, nextRules);
-    await this.refreshVpnStatusForIndependentSettings('smart agent rule order');
+    this.statusText = 'Rules updated';
+    this.refreshIndependentSettingsInBackground('smart agent rule order');
   }
 
   private async toggleDohEnabled(): Promise<void> {
+    this.dohLoadVersion++;
     const nextEnabled = !this.dohEnabled;
     this.dohEnabled = nextEnabled;
     const context = getContext(this) as common.UIAbilityContext;
@@ -723,14 +853,27 @@ struct Index {
       enabled: nextEnabled,
       provider: this.dohProvider
     });
+    await this.restartVpnIfRunning('tunnel doh toggle');
+  }
+
+  private async toggleBrowserDohEnabled(): Promise<void> {
+    this.browserDohLoadVersion++;
+    const nextEnabled = !this.browserDohEnabled;
+    this.browserDohEnabled = nextEnabled;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveBrowserDohSettings(context, {
+      enabled: nextEnabled,
+      provider: this.browserDohProvider
+    });
     applyWebHttpDnsFromDohSettings({
       enabled: nextEnabled,
-      provider: this.dohProvider
+      provider: this.browserDohProvider
     });
-    await this.refreshVpnStatusForIndependentSettings('doh toggle');
+    await this.refreshVpnStatusForIndependentSettings('browser doh toggle');
   }
 
   private async toggleAppSplit(): Promise<void> {
+    this.appSplitLoadVersion++;
     const nextEnabled = !this.appSplitEnabled;
     this.appSplitEnabled = nextEnabled;
     try {
@@ -836,6 +979,7 @@ struct Index {
   }
 
   private async saveAppPickerSelection(): Promise<void> {
+    this.appSplitLoadVersion++;
     const selectedApps: SplitAppInfo[] = [];
     for (let index = 0; index < this.availableSplitApps.length; index++) {
       const app = this.availableSplitApps[index];
@@ -863,17 +1007,29 @@ struct Index {
 
   private async refreshVpnStatusForIndependentSettings(reason: string): Promise<void> {
     hilog.info(DOMAIN, TAG, 'settings updated without vpn restart reason=%{public}s', reason);
-    if (this.runtimeRunning || this.vpnEnabled) {
-      await this.requestRuntimeStatusRefresh();
-    }
     this.statusText = 'Rules updated';
   }
 
+  private refreshIndependentSettingsInBackground(reason: string): void {
+    this.refreshVpnStatusForIndependentSettings(reason).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'background settings refresh failed reason=%{public}s error=%{public}s',
+        reason, err.message ?? JSON.stringify(err));
+    });
+  }
+
   private async loadLogs(): Promise<void> {
+    const loadVersion = ++this.logsLoadVersion;
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      this.logs = await loadAgentLogs(context, true);
+      const logs = await loadAgentLogs(context, true);
+      if (loadVersion !== this.logsLoadVersion) {
+        return;
+      }
+      this.logs = logs;
     } catch (err) {
+      if (loadVersion !== this.logsLoadVersion) {
+        return;
+      }
       const error = err as BusinessError;
       hilog.warn(DOMAIN, TAG, 'load logs failed: %{public}s', error.message ?? JSON.stringify(err));
     }
@@ -881,6 +1037,7 @@ struct Index {
 
   private async clearLogs(): Promise<void> {
     try {
+      this.logsLoadVersion++;
       const context = getContext(this) as common.UIAbilityContext;
       await clearAgentLogs(context);
       this.logs = [];
@@ -969,6 +1126,56 @@ struct Index {
     return -1;
   }
 
+  private findAgentRuleById(rules: AgentRule[], ruleId: string): AgentRule | undefined {
+    for (let index = 0; index < rules.length; index++) {
+      if (rules[index].id === ruleId) {
+        return rules[index];
+      }
+    }
+    return undefined;
+  }
+
+  private sameAgentRuleValue(left: AgentRule, right: AgentRule): boolean {
+    return left.id === right.id &&
+      left.type === right.type &&
+      left.matchValue === right.matchValue &&
+      left.targetTunnelId === right.targetTunnelId &&
+      left.targetTunnelName === right.targetTunnelName &&
+      left.enabled === right.enabled;
+  }
+
+  private describeAgentRules(rules: AgentRule[]): string {
+    if (rules.length === 0) {
+      return '<empty>';
+    }
+
+    const parts: string[] = [];
+    for (let index = 0; index < rules.length; index++) {
+      parts.push(this.describeAgentRule(rules[index]));
+    }
+    return parts.join('|');
+  }
+
+  private describeAgentRuleOrMissing(rule: AgentRule | undefined): string {
+    if (rule === undefined) {
+      return '<missing>';
+    }
+    return this.describeAgentRule(rule);
+  }
+
+  private describeAgentRule(rule: AgentRule): string {
+    const target = rule.targetTunnelId.length > 0 ? rule.targetTunnelId : 'direct';
+    const value = rule.matchValue.length > 0 ? rule.matchValue : '-';
+    return this.shortRuleId(rule.id) + ':' + rule.type + ':' + value + ':' + target + ':' + (rule.enabled ? 'on' : 'off');
+  }
+
+  private shortRuleId(ruleId: string): string {
+    if (ruleId.length <= 8) {
+      return ruleId;
+    }
+    return ruleId.substring(ruleId.length - 8);
+  }
+
   private resolveTunnelName(tunnelId: string, fallbackName: string): string {
     for (let index = 0; index < this.tunnels.length; index++) {
       const tunnel = this.tunnels[index];
@@ -999,6 +1206,7 @@ struct Index {
         configText: this.editingConfig
       };
       await saveTunnel(context, tunnel);
+      this.tunnelLoadVersion++;
       this.tunnels = await loadTunnels(context);
       this.closeEditor();
       this.statusText = 'Saved';
@@ -1033,6 +1241,7 @@ struct Index {
         configText: importedConfig
       };
       await saveTunnel(context, tunnel);
+      this.tunnelLoadVersion++;
       this.tunnels = await loadTunnels(context);
       this.openTunnel(tunnel);
       this.statusText = 'Imported';
@@ -1177,6 +1386,12 @@ struct Index {
     if (tunnelId.length === 0) {
       return;
     }
+    if (!this.isSavedTunnelId(tunnelId)) {
+      if (this.editingTunnelId === tunnelId) {
+        this.closeEditor();
+      }
+      return;
+    }
     if (this.vpnEnabled && this.activeTunnelId === tunnelId) {
       this.statusText = 'Stop VPN before deleting';
       return;
@@ -1186,6 +1401,7 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       await deleteTunnel(context, tunnelId);
+      this.tunnelLoadVersion++;
       this.tunnels = await loadTunnels(context);
       if (this.editingTunnelId === tunnelId) {
         this.closeEditor();
@@ -1243,9 +1459,24 @@ struct Index {
     return this.activeTunnelId === this.editingTunnelId;
   }
 
+  private isSavedEditingTunnel(): boolean {
+    return this.isSavedTunnelId(this.editingTunnelId);
+  }
+
+  private isSavedTunnelId(tunnelId: string): boolean {
+    if (tunnelId.length === 0) {
+      return false;
+    }
+    for (let index = 0; index < this.tunnels.length; index++) {
+      if (this.tunnels[index].id === tunnelId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private startStatusRefresh(): void {
     this.stopStatusRefresh();
-    hilog.info(DOMAIN, TAG, 'start runtime status refresh interval=%{public}d', STATUS_REFRESH_INTERVAL_MS);
     this.statusRefreshTimer = setInterval(() => {
       this.refreshRuntimeStatus();
     }, STATUS_REFRESH_INTERVAL_MS);
@@ -1255,29 +1486,25 @@ struct Index {
     if (this.statusRefreshTimer >= 0) {
       clearInterval(this.statusRefreshTimer);
       this.statusRefreshTimer = -1;
-      hilog.info(DOMAIN, TAG, 'stop runtime status refresh');
     }
   }
 
   private async refreshRuntimeStatus(): Promise<void> {
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const activeInfo: ActiveTunnelInfo = await loadActiveTunnelInfo(context, true);
-      this.logs = await loadAgentLogs(context, true);
-      let status: TunnelRuntimeStatus = await loadTunnelRuntimeStatus(context, true);
-      const wasRunning = this.runtimeRunning || this.vpnEnabled || status.running;
-      if (wasRunning || this.startingTunnelId.length > 0) {
-        await this.requestRuntimeStatusRefresh();
-        await this.sleep(150);
-        status = await loadTunnelRuntimeStatus(context, true);
+      const status: TunnelRuntimeStatus = await loadTunnelRuntimeStatus(context, true);
+      const runtimeAlive = this.isRuntimeStatusAlive(status);
+      const wasRunning = this.runtimeRunning || this.vpnEnabled || runtimeAlive;
+      if (this.currentTabIndex === TAB_LOGS) {
+        this.logs = await loadAgentLogs(context, true);
       }
 
       const pendingStart = this.isStartupGraceActive(status);
-      const running = status.running || pendingStart;
+      const running = runtimeAlive || pendingStart;
       const hasRuntimeStats = running;
 
-      const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status, activeInfo.id) : '';
-      const resolvedTunnelName = running ? this.resolveRuntimeTunnelName(status, resolvedTunnelId, activeInfo.name) : '';
+      const resolvedTunnelId = running ? this.resolveRuntimeTunnelId(status, this.activeTunnelId) : '';
+      const resolvedTunnelName = running ? this.resolveRuntimeTunnelName(status, resolvedTunnelId, this.runtimeTunnelName) : '';
       this.runtimeRunning = running;
       this.runtimeTunnelId = hasRuntimeStats ? resolvedTunnelId : '';
       this.runtimeTunnelName = hasRuntimeStats ? resolvedTunnelName : '';
@@ -1289,7 +1516,7 @@ struct Index {
       this.runtimeUpdatedAt = status.updatedAt;
       this.vpnEnabled = running;
       this.activeTunnelId = resolvedTunnelId;
-      if (status.running) {
+      if (runtimeAlive) {
         this.runtimeConfirmedRunning = true;
         this.startingTunnelId = resolvedTunnelId;
         this.startingTunnelName = resolvedTunnelName;
@@ -1298,9 +1525,9 @@ struct Index {
         this.clearRequestedRuntimeTunnel();
       }
 
-      if (wasRunning && !running && this.shouldKeepRuntimeAliveDuringGrace(status, activeInfo)) {
+      if (wasRunning && !running && await this.shouldKeepRuntimeAliveDuringGrace(context, status)) {
         this.vpnEnabled = true;
-        const reconnectingName = this.resolveRuntimeTunnelName(status, activeInfo.id, activeInfo.name);
+        const reconnectingName = this.resolveRuntimeTunnelName(status, this.activeTunnelId, this.runtimeTunnelName);
         this.statusText = reconnectingName.length > 0 ? 'Reconnecting: ' + reconnectingName : 'Reconnecting';
         hilog.warn(DOMAIN, TAG, 'ignore transient stopped runtime during grace age=%{public}d', this.runtimeStatusAge(status));
       } else if (wasRunning && !running && !this.busy && this.runtimeConfirmedRunning) {
@@ -1340,15 +1567,21 @@ struct Index {
     return true;
   }
 
-  private shouldKeepRuntimeAliveDuringGrace(status: TunnelRuntimeStatus, activeInfo: ActiveTunnelInfo): boolean {
+  private async shouldKeepRuntimeAliveDuringGrace(
+    context: common.UIAbilityContext,
+    status: TunnelRuntimeStatus
+  ): Promise<boolean> {
     if (this.busy) {
       return true;
     }
     if (!this.runtimeConfirmedRunning && !this.vpnEnabled && this.startingTunnelId.length === 0) {
       return false;
     }
-    if (activeInfo.configText.length === 0) {
-      return false;
+    if (this.activeTunnelId.length === 0 && this.startingTunnelId.length === 0 && this.runtimeTunnelId.length === 0) {
+      const activeInfo = await loadActiveTunnelInfo(context, true);
+      if (activeInfo.configText.length === 0) {
+        return false;
+      }
     }
     const age = this.runtimeStatusAge(status);
     return age >= 0 && age <= RUNTIME_STOP_GRACE_MS;
@@ -1414,6 +1647,15 @@ struct Index {
     this.currentTabIndex = index;
     this.highlightedTabIndex = index;
     this.animateTabIndicatorTo(index);
+    if (index === TAB_LOGS) {
+      this.loadLogs();
+      return;
+    }
+    if (index === TAB_TUNNELS) {
+      this.ensureActiveTunnelRunningOnVpnHome('tab').catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'vpn tab ensure running failed: %{public}s', err.message ?? JSON.stringify(err));
+      });
+    }
   }
 
   private updateTabIndicatorFromSwipe(index: number, currentOffset: number): void {
@@ -1503,17 +1745,32 @@ struct Index {
     if (provider.length === 0 || this.dohProvider === provider) {
       return;
     }
+    this.dohLoadVersion++;
     this.dohProvider = provider;
     const context = getContext(this) as common.UIAbilityContext;
     await saveDohSettings(context, {
       enabled: this.dohEnabled,
       provider: this.dohProvider
     });
-    applyWebHttpDnsFromDohSettings({
-      enabled: this.dohEnabled,
-      provider: this.dohProvider
+    await this.restartVpnIfRunning('tunnel doh provider');
+  }
+
+  private async selectBrowserDohProvider(provider: string): Promise<void> {
+    if (provider.length === 0 || this.browserDohProvider === provider) {
+      return;
+    }
+    this.browserDohLoadVersion++;
+    this.browserDohProvider = provider;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveBrowserDohSettings(context, {
+      enabled: this.browserDohEnabled,
+      provider: this.browserDohProvider
     });
-    await this.refreshVpnStatusForIndependentSettings('doh provider');
+    applyWebHttpDnsFromDohSettings({
+      enabled: this.browserDohEnabled,
+      provider: this.browserDohProvider
+    });
+    await this.refreshVpnStatusForIndependentSettings('browser doh provider');
   }
 
   private async openIssueReport(): Promise<void> {
@@ -1546,6 +1803,22 @@ struct Index {
       running: true,
       tunnelId: tunnel.id,
       tunnelName: tunnel.name,
+      txBytes: 0,
+      rxBytes: 0,
+      latestHandshakeSeconds: -1,
+      latestPacketSentSeconds: -1,
+      loss: 0,
+      rttMillis: -1,
+      updatedAt: Date.now()
+    };
+    return status;
+  }
+
+  private buildPendingRuntimeStatusByIdentity(tunnelId: string, tunnelName: string): TunnelRuntimeStatus {
+    const status: TunnelRuntimeStatus = {
+      running: true,
+      tunnelId: tunnelId,
+      tunnelName: tunnelName,
       txBytes: 0,
       rxBytes: 0,
       latestHandshakeSeconds: -1,
@@ -1593,28 +1866,50 @@ struct Index {
     return want;
   }
 
-  private buildRefreshStatusWant(): Want {
+  private buildRestoreWant(): Want {
     const want = this.buildWant();
     want.parameters = {
-      action: VPN_ACTION_REFRESH_STATUS
+      action: VPN_ACTION_RESTORE
     };
     return want;
   }
 
-  private async requestRuntimeStatusRefresh(): Promise<void> {
+  private async ensureActiveTunnelRunningOnVpnHome(reason: string): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const activeInfo = await loadActiveTunnelInfo(context, true);
+    const hasActiveTunnel = activeInfo.configText.length > 0 || activeInfo.id.length > 0 || activeInfo.name.length > 0;
+    if (!hasActiveTunnel) {
+      return;
+    }
+
+    const runtimeStatus = await loadTunnelRuntimeStatus(context, true);
+    if (this.isRuntimeStatusAlive(runtimeStatus)) {
+      return;
+    }
+
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'vpn home restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
+      reason,
+      activeInfo.id,
+      activeInfo.name
+    );
+    await saveTunnelRuntimeStatus(context, this.buildPendingRuntimeStatusByIdentity(activeInfo.id, activeInfo.name));
     try {
-      await vpnExtension.startVpnExtensionAbility(this.buildRefreshStatusWant());
+      await startVpnDataTransferTask(context);
+      await vpnExtension.startVpnExtensionAbility(this.buildRestoreWant());
     } catch (err) {
+      await saveTunnelRuntimeStatus(context, this.buildStoppedRuntimeStatus());
       const error = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, 'request runtime status refresh failed: %{public}s', error.message ?? JSON.stringify(err));
+      throw new Error(error.message ?? JSON.stringify(err));
     }
   }
 
-  private sleep(durationMs: number): Promise<void> {
-    return new Promise<void>((resolve: () => void) => {
-      setTimeout(() => {
-        resolve();
-      }, durationMs);
-    });
+  private isRuntimeStatusAlive(status: TunnelRuntimeStatus): boolean {
+    if (!status.running || status.updatedAt <= 0) {
+      return false;
+    }
+    return Date.now() - status.updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;
   }
 }

@@ -7,6 +7,16 @@ export interface WebBrowserErrorState {
   kind: string;
 }
 
+export type WebAddressSuggestionKind = 'history';
+
+export interface WebAddressSuggestionItem {
+  id: string;
+  kind: WebAddressSuggestionKind;
+  url: string;
+  title: string;
+  subtitle: string;
+}
+
 export interface PullRefreshState {
   refreshing: boolean;
   tracking: boolean;

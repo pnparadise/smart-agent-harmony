@@ -1,5 +1,6 @@
 import { webview } from '@kit.ArkWeb';
 import {
+  WebViewSurfaceExternalNavigationEvent,
   WebViewSurface,
   WebViewSurfaceFullScreenEvent,
   WebViewSurfaceLoadErrorEvent,
@@ -23,6 +24,7 @@ export struct WebBrowserSurfaceStack {
   @Prop bookmarkHomeVisible: boolean = false;
   @Prop webFullScreen: boolean = false;
 
+  srcFor: (surfaceKey: string) => string = () => '';
   controllerFor: (surfaceKey: string) => webview.WebviewController = () => FALLBACK_SURFACE_CONTROLLER;
   surfaceVisibleFor: (surfaceKey: string) => boolean = () => false;
   onControllerAttached: (surfaceKey: string) => void = () => {};
@@ -39,6 +41,7 @@ export struct WebBrowserSurfaceStack {
   onPullGestureStart: (surfaceKey: string) => void = () => {};
   onPullGestureUpdate: (surfaceKey: string, event: WebViewSurfacePullGestureEvent) => void = () => {};
   onPullGestureEnd: (surfaceKey: string) => void = () => {};
+  onExternalNavigation: (surfaceKey: string, event: WebViewSurfaceExternalNavigationEvent) => void = () => {};
   onFullScreenEnter: (surfaceKey: string, event: WebViewSurfaceFullScreenEvent) => void = () => {};
   onFullScreenExit: (surfaceKey: string) => void = () => {};
   onLoadError: (surfaceKey: string, event: WebViewSurfaceLoadErrorEvent) => void = () => {};
@@ -47,7 +50,7 @@ export struct WebBrowserSurfaceStack {
     Stack({ alignContent: Alignment.TopStart }) {
       ForEach(this.surfaceKeys, (surfaceKey: string) => {
         WebViewSurface({
-          src: '',
+          src: this.srcFor(surfaceKey),
           controller: this.controllerFor(surfaceKey),
           onControllerAttached: (): void => {
             this.onControllerAttached(surfaceKey);
@@ -90,6 +93,9 @@ export struct WebBrowserSurfaceStack {
           },
           onPullGestureEnd: (): void => {
             this.onPullGestureEnd(surfaceKey);
+          },
+          onExternalNavigation: (event: WebViewSurfaceExternalNavigationEvent): void => {
+            this.onExternalNavigation(surfaceKey, event);
           },
           onFullScreenEnter: (event: WebViewSurfaceFullScreenEvent): void => {
             this.onFullScreenEnter(surfaceKey, event);

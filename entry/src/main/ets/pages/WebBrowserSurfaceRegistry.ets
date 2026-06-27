@@ -28,6 +28,23 @@ export class WebBrowserSurfaceRegistry {
         return this.surfaces[index];
       }
     }
+    return this.createSurface(stateKey);
+  }
+
+  reset(tabId: string): WebSurfaceEntry {
+    const id = WebBrowserStateStore.safeFileSegment(tabId);
+    const stateKey = id.length > 0 ? id : WEB_HOME_TAB_ID;
+    const nextSurfaces: WebSurfaceEntry[] = [];
+    for (let index = 0; index < this.surfaces.length; index++) {
+      if (this.surfaces[index].id !== stateKey) {
+        nextSurfaces.push(this.surfaces[index]);
+      }
+    }
+    this.surfaces = nextSurfaces;
+    return this.createSurface(stateKey);
+  }
+
+  private createSurface(stateKey: string): WebSurfaceEntry {
     const key = stateKey + '_' + (++this.serial).toString();
     const surface: WebSurfaceEntry = {
       id: stateKey,

@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { webview } from '@kit.ArkWeb';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { DohSettings, loadDohSettings } from './ConfigStore';
+import { DohSettings, loadBrowserDohSettings } from './ConfigStore';
 
 const DOMAIN = 0x0001;
 const TAG = 'WebHttpDns';
@@ -12,7 +12,7 @@ const HTTPDNS_OFF_CONFIG = 'https://example.invalid';
 type StoreContext = common.UIAbilityContext | common.VpnExtensionContext;
 
 export async function syncWebHttpDnsFromDohSettings(context: StoreContext): Promise<void> {
-  const settings = await loadDohSettings(context, true);
+  const settings = await loadBrowserDohSettings(context, true);
   applyWebHttpDnsFromDohSettings(settings);
 }
 

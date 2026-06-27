@@ -25,8 +25,10 @@ export struct TunnelsPage {
   @Prop startingTunnelId: string = '';
   @Prop startingTunnelName: string = '';
   onImportConfig: () => void = () => {};
+  onCreateTunnel: () => void = () => {};
   onOpenTunnel: (tunnel: TunnelConfig) => void = () => {};
   onToggleTunnel: (tunnel: TunnelConfig) => void = () => {};
+  @State private addMenuExpanded: boolean = false;
 
   build() {
     Stack({ alignContent: Alignment.BottomEnd }) {
@@ -59,29 +61,83 @@ export struct TunnelsPage {
       .height('100%')
       .scrollBar(BarState.Off)
 
-      Button() {
-        Text('+')
-          .fontSize(28)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(PRIMARY_BLUE)
-          .height(48)
-          .textAlign(TextAlign.Center)
+      if (this.addMenuExpanded) {
+        Blank()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#00000000')
+          .onClick(() => {
+            this.setAddMenuExpanded(false);
+          })
       }
-        .enabled(!this.busy)
-        .type(ButtonType.Normal)
-        .width(54)
-        .height(54)
-        .backgroundColor(CARD_BACKGROUND)
-        .borderRadius(27)
-        .shadow({ radius: 22, color: '#263478F6', offsetX: 0, offsetY: 8 })
-        .margin({ right: 22, bottom: 28 })
-        .onClick(() => {
-          this.onImportConfig();
-        })
+
+      Row() {
+        if (this.addMenuExpanded) {
+          this.buildAddMenuAction('新增', $r('app.media.ic_edit_gray'), () => {
+            this.setAddMenuExpanded(false);
+            this.onCreateTunnel();
+          })
+          this.buildAddMenuAction('导入', $r('app.media.ic_import_blue'), () => {
+            this.setAddMenuExpanded(false);
+            this.onImportConfig();
+          })
+        }
+
+        Button() {
+          Text('+')
+            .fontSize(28)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(PRIMARY_BLUE)
+            .height(48)
+            .textAlign(TextAlign.Center)
+            .rotate({ angle: this.addMenuExpanded ? 45 : 0 })
+        }
+          .enabled(!this.busy)
+          .type(ButtonType.Normal)
+          .width(54)
+          .height(54)
+          .backgroundColor(CARD_BACKGROUND)
+          .borderRadius(27)
+          .shadow({ radius: 22, color: '#263478F6', offsetX: 0, offsetY: 8 })
+          .onClick(() => {
+            this.setAddMenuExpanded(!this.addMenuExpanded);
+          })
+      }
+      .alignItems(VerticalAlign.Center)
+      .margin({ right: 22, bottom: 28 })
+      .zIndex(2)
     }
     .width('100%')
     .height('100%')
     .backgroundColor(PAGE_BACKGROUND)
+  }
+
+  @Builder
+  private buildAddMenuAction(label: string, icon: ResourceStr, action: () => void) {
+    Button() {
+      Row() {
+        Image(icon)
+          .width(18)
+          .height(18)
+          .margin({ right: 10 })
+        Text(label)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(TEXT_PRIMARY)
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .enabled(!this.busy)
+    .type(ButtonType.Normal)
+    .height(44)
+    .padding({ left: 16, right: 16 })
+    .margin({ right: 12 })
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(22)
+    .shadow({ radius: 18, color: '#1A000000', offsetX: 0, offsetY: 6 })
+    .onClick(() => {
+      action();
+    })
   }
 
   @Builder
@@ -234,6 +290,9 @@ export struct TunnelsPage {
       .backgroundColor('#F6F7F9')
       .borderRadius(12)
       .margin({ right: 20 })
+      .onClick(() => {
+        this.onOpenTunnel(tunnel);
+      })
 
       Column() {
         Text(tunnel.name)
@@ -416,5 +475,11 @@ export struct TunnelsPage {
       return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
     }
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  }
+
+  private setAddMenuExpanded(expanded: boolean): void {
+    animateTo({ duration: 180, curve: Curve.EaseInOut }, () => {
+      this.addMenuExpanded = expanded;
+    });
   }
 }
