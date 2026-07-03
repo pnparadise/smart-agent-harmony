@@ -1,9 +1,12 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError, commonEventManager } from '@kit.BasicServicesKit';
+import { vpnExtension } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import {
+  loadActiveTunnelInfo,
+  loadTunnelRuntimeStatus,
   loadLastWebShortcutUrl,
   loadWebBookmarks,
   loadWebShortcutUrl,
@@ -17,6 +20,11 @@ import { WEB_SHORTCUT_CLOSE_EVENT } from './WebShortcutCloseEvents';
 
 const DOMAIN = 0x0001;
 const TAG = 'WebShortcutAbility';
+const BUNDLE_NAME = 'com.smart.agent';
+const MODULE_NAME = 'entry';
+const VPN_ABILITY = 'WgVpnExtensionAbility';
+const VPN_ACTION_RESTORE = 'restore';
+const VPN_RUNTIME_ALIVE_MAX_AGE_MS = 10000;
 const WEB_SHORTCUT_URL_KEY = 'webUrl';
 const WEB_SHORTCUT_ID_KEY = 'webShortcutId';
 const WEB_SHORTCUT_URL_STORAGE_KEY = 'webShortcutInitialUrl';
@@ -35,12 +43,16 @@ export default class WebShortcutAbility extends UIAbility {
   private windowStage?: window.WindowStage;
   private shortcutId: string = '';
   private closeSubscriber?: commonEventManager.CommonEventSubscriber;
+  private vpnRestoreInFlight: boolean = false;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     this.initializeWebEngine();
     this.pendingWant = want;
     this.subscribeCloseEvent();
+    this.restoreVpnIfNeeded('onCreate').catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'restore vpn on create failed: %{public}s', this.formatError(err));
+    });
   }
 
   onDestroy(): void {
@@ -74,6 +86,9 @@ export default class WebShortcutAbility extends UIAbility {
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onNewWant');
     this.activateWindow();
+    this.restoreVpnIfNeeded('onNewWant').catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'restore vpn on newWant failed: %{public}s', this.formatError(err));
+    });
     this.initializeStorage(want).catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'update shortcut storage failed: %{public}s', this.formatError(err));
     });
@@ -82,6 +97,9 @@ export default class WebShortcutAbility extends UIAbility {
   onForeground(): void {
     hilog.info(DOMAIN, TAG, 'onForeground');
     this.activateWindow();
+    this.restoreVpnIfNeeded('onForeground').catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'restore vpn on foreground failed: %{public}s', this.formatError(err));
+    });
   }
 
   onBackground(): void {
@@ -92,6 +110,67 @@ export default class WebShortcutAbility extends UIAbility {
   onWindowStageDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onWindowStageDestroy');
     this.windowStage = undefined;
+  }
+
+  private async restoreVpnIfNeeded(reason: string): Promise<void> {
+    if (this.vpnRestoreInFlight) {
+      hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, restore already in flight', reason);
+      return;
+    }
+
+    this.vpnRestoreInFlight = true;
+    try {
+      const activeInfo = await loadActiveTunnelInfo(this.context, true);
+      const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
+      if (!hasActiveTunnel) {
+        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, no active tunnel', reason);
+        return;
+      }
+
+      const runtimeStatus = await loadTunnelRuntimeStatus(this.context, true);
+      if (this.isRuntimeStatusAlive(runtimeStatus.running, runtimeStatus.updatedAt)) {
+        hilog.info(
+          DOMAIN,
+          TAG,
+          'WebShortcutAbility skip vpn restore reason=%{public}s, runtime alive tunnelId=%{public}s',
+          reason,
+          runtimeStatus.tunnelId
+        );
+        return;
+      }
+
+      await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'WebShortcutAbility vpn restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
+        reason,
+        activeInfo.id,
+        activeInfo.name
+      );
+    } finally {
+      this.vpnRestoreInFlight = false;
+    }
+  }
+
+  private isRuntimeStatusAlive(running: boolean, updatedAt: number): boolean {
+    if (!running || updatedAt <= 0) {
+      return false;
+    }
+    return Date.now() - updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;
+  }
+
+  private buildVpnWant(): Want {
+    const want: Want = {
+      deviceId: '',
+      bundleName: BUNDLE_NAME,
+      moduleName: MODULE_NAME,
+      abilityName: VPN_ABILITY,
+      parameters: {
+        action: VPN_ACTION_RESTORE
+      }
+    };
+    return want;
   }
 
   private initializeWebEngine(): void {

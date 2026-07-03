@@ -33,12 +33,14 @@ export async function startVpnDataTransferTask(context: common.UIAbilityContext)
     cachedDataTransferNotificationId = notification.notificationId;
     await saveDataTransferNotificationId(context, notification.notificationId);
     vpnDataTransferTaskStarted = true;
+    hilog.info(DOMAIN, TAG, 'VpnBackgroundTask start continuous task notificationId=%{public}d', notification.notificationId);
     await updateVpnDataTransferNotification(context, '', 0, 0);
   } catch (err) {
     const error = err as BusinessError;
     if (await hasContinuousTask(context)) {
       vpnDataTransferTaskStarted = true;
       await syncExistingDataTransferNotificationId(context);
+      hilog.info(DOMAIN, TAG, 'VpnBackgroundTask reuse existing continuous task');
       return;
     }
     vpnDataTransferTaskStarted = false;
@@ -57,12 +59,13 @@ export async function stopVpnDataTransferTask(context: common.UIAbilityContext):
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
+    hilog.info(DOMAIN, TAG, 'VpnBackgroundTask stop continuous task');
   } catch (err) {
     const error = err as BusinessError;
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
-    hilog.warn(DOMAIN, TAG, 'stop continuous task failed: %{public}s', formatError(error));
+    hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask stop continuous task failed: %{public}s', formatError(error));
   }
 }
 
@@ -104,7 +107,7 @@ export async function updateVpnDataTransferNotification(
     await notificationManager.publish(request);
   } catch (err) {
     const error = err as BusinessError;
-    hilog.warn(DOMAIN, TAG, 'update dataTransfer notification failed: %{public}s', formatError(error));
+    hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask update dataTransfer notification failed: %{public}s', formatError(error));
   }
 }
 
@@ -130,7 +133,7 @@ async function hasContinuousTask(context: common.UIAbilityContext): Promise<bool
   } catch (err) {
     const error = err as BusinessError;
     if (vpnDataTransferTaskStarted) {
-      hilog.warn(DOMAIN, TAG, 'query continuous task failed while marked active: %{public}s', formatError(error));
+      hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask query continuous task failed while marked active: %{public}s', formatError(error));
     }
     return vpnDataTransferTaskStarted;
   }
@@ -144,12 +147,13 @@ async function syncExistingDataTransferNotificationId(context: common.UIAbilityC
       if (notificationId > 0) {
         cachedDataTransferNotificationId = notificationId;
         await saveDataTransferNotificationId(context, notificationId);
+        hilog.info(DOMAIN, TAG, 'VpnBackgroundTask sync existing notificationId=%{public}d', notificationId);
         return;
       }
     }
   } catch (err) {
     const error = err as BusinessError;
-    hilog.warn(DOMAIN, TAG, 'sync dataTransfer notification id failed: %{public}s', formatError(error));
+    hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask sync dataTransfer notification id failed: %{public}s', formatError(error));
   }
 }
 

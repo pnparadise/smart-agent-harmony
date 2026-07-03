@@ -26,7 +26,7 @@ export default class EntryAbility extends UIAbility {
   private windowStage?: window.WindowStage;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    hilog.info(DOMAIN, TAG, 'onCreate');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onCreate');
     this.initializeWebEngine();
     this.restoreVpnIfNeeded('onCreate').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on create failed: %{public}s', this.formatError(err));
@@ -34,7 +34,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
-    hilog.info(DOMAIN, TAG, 'onDestroy');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onDestroy');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -51,16 +51,16 @@ export default class EntryAbility extends UIAbility {
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    hilog.info(DOMAIN, TAG, 'onNewWant');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onNewWant');
   }
 
   onWindowStageDestroy(): void {
-    hilog.info(DOMAIN, TAG, 'onWindowStageDestroy');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onWindowStageDestroy');
     this.windowStage = undefined;
   }
 
   onForeground(): void {
-    hilog.info(DOMAIN, TAG, 'onForeground');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onForeground');
     this.activateWindow();
     this.restoreVpnIfNeeded('onForeground').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on foreground failed: %{public}s', this.formatError(err));
@@ -76,10 +76,13 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
-    hilog.info(DOMAIN, TAG, 'onBackground');
+    hilog.info(DOMAIN, TAG, 'EntryAbility onBackground');
     notifyWebBrowserBackgroundForPictureInPicture();
     this.startVpnBackgroundTaskIfNeeded().catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'start vpn background task failed: %{public}s', this.formatError(err));
+    });
+    this.restoreVpnIfNeeded('onBackground').catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'restore vpn on background failed: %{public}s', this.formatError(err));
     });
   }
 
@@ -92,7 +95,7 @@ export default class EntryAbility extends UIAbility {
       hilog.info(
         DOMAIN,
         TAG,
-        'skip vpn background task, runtime stopped activeTunnel=%{public}s',
+        'EntryAbility skip vpn background task, runtime stopped activeTunnel=%{public}s',
         String(hasActiveTunnel)
       );
       return;
@@ -102,7 +105,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'vpn background task ensured running=%{public}s activeTunnel=%{public}s',
+      'EntryAbility vpn background task ensured running=%{public}s activeTunnel=%{public}s',
       String(status.running),
       String(hasActiveTunnel)
     );
@@ -110,7 +113,7 @@ export default class EntryAbility extends UIAbility {
 
   private async restoreVpnIfNeeded(reason: string): Promise<void> {
     if (this.vpnRestoreInFlight) {
-      hilog.info(DOMAIN, TAG, 'skip vpn restore reason=%{public}s, restore already in flight', reason);
+      hilog.info(DOMAIN, TAG, 'EntryAbility skip vpn restore reason=%{public}s, restore already in flight', reason);
       return;
     }
 
@@ -126,7 +129,7 @@ export default class EntryAbility extends UIAbility {
     const activeInfo = await loadActiveTunnelInfo(this.context, true);
     const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
     if (!hasActiveTunnel) {
-      hilog.info(DOMAIN, TAG, 'skip vpn restore reason=%{public}s, no active tunnel', reason);
+      hilog.info(DOMAIN, TAG, 'EntryAbility skip vpn restore reason=%{public}s, no active tunnel', reason);
       return;
     }
 
@@ -135,7 +138,7 @@ export default class EntryAbility extends UIAbility {
       hilog.info(
         DOMAIN,
         TAG,
-        'skip vpn restore reason=%{public}s, runtime alive tunnelId=%{public}s',
+        'EntryAbility skip vpn restore reason=%{public}s, runtime alive tunnelId=%{public}s',
         reason,
         runtimeStatus.tunnelId
       );
@@ -147,7 +150,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'vpn restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
+      'EntryAbility vpn restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
       reason,
       activeInfo.id,
       activeInfo.name
@@ -177,7 +180,7 @@ export default class EntryAbility extends UIAbility {
   private initializeWebEngine(): void {
     try {
       webview.WebviewController.initializeWebEngine();
-      hilog.info(DOMAIN, TAG, 'web engine initialized');
+      hilog.info(DOMAIN, TAG, 'EntryAbility web engine initialized');
       syncWebHttpDnsFromDohSettings(this.context).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'sync web httpdns failed: %{public}s', this.formatError(err));
       });

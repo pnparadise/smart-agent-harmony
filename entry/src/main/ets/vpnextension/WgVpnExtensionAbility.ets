@@ -41,6 +41,7 @@ const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 5000;
 const RUNTIME_STATUS_PUBLISH_INTERVAL_MS = 3000;
 const WANT_ACTION_RESTORE = 'restore';
 const DOH_RESOLVE_TIMEOUT_MS = 8000;
+const NATIVE_TUNNEL_STALE_TICK_SECONDS = 12;
 
 interface DnsJsonAnswer {
   data?: string;
@@ -82,9 +83,10 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private lastLoggedTunDroppedPackets: number = -1;
   private lastLoggedUdpReadPackets: number = -1;
   private networkStrategyInFlight: boolean = false;
+  private nativeTunnelDeathLogged: boolean = false;
 
   onCreate(want: Want): void {
-    hilog.info(DOMAIN, TAG, 'onCreate');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension onCreate');
     this.restartWireGuard('onCreate', false).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'start failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
@@ -94,7 +96,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   onRequest(want: Want, startId: number): void {
-    hilog.info(DOMAIN, TAG, 'onRequest startId=%{public}d ability=%{public}s', startId, want.abilityName ?? '');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension onRequest startId=%{public}d ability=%{public}s', startId, want.abilityName ?? '');
     if (this.isRestoreWant(want) && this.tunnelHandle !== 0) {
       this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish restore status failed: %{public}s', this.formatError(err));
@@ -111,7 +113,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   onDestroy(): void {
-    hilog.info(DOMAIN, TAG, 'onDestroy');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension onDestroy');
     this.cleanup(false).catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'cleanup on destroy failed: %{public}s', this.formatError(err));
     });
@@ -161,7 +163,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async startWireGuard(desiredState?: DesiredVpnState): Promise<void> {
-    hilog.info(DOMAIN, TAG, 'startWireGuard begin');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension startWireGuard begin');
 
     const desired = desiredState === undefined ? await this.resolveDesiredVpnState() : desiredState;
     const activeInfo = desired.activeInfo;
@@ -260,8 +262,9 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       hilog.info(DOMAIN, TAG, 'vpn tun created, fd=%{public}d', tunFd);
 
       NativeTunnel.start(this.tunnelHandle, tunFd);
-      hilog.info(DOMAIN, TAG, 'native tunnel started');
+      hilog.info(DOMAIN, TAG, 'WgVpnExtension native tunnel started');
       this.runningConfigFingerprint = desired.fingerprint;
+      this.nativeTunnelDeathLogged = false;
       this.appendVpnRestartLog(this.activeTunnelName, Date.now());
       this.startNetworkObserver();
       this.startDataTransferNotificationUpdates();
@@ -275,7 +278,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       await this.cleanup();
       throw new Error('Failed to start WireGuard tunnel: ' + this.formatError(error));
     }
-    hilog.info(DOMAIN, TAG, 'WireGuard tunnel started');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension WireGuard tunnel started');
   }
 
   private appendVpnRestartLog(tunnelName: string, createdAt: number): void {
@@ -685,7 +688,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'cleanup begin handle=%{public}d hasConnection=%{public}s activeId=%{public}s publishStopped=%{public}s',
+      'WgVpnExtension cleanup begin handle=%{public}d hasConnection=%{public}s activeId=%{public}s publishStopped=%{public}s',
       this.tunnelHandle,
       String(this.vpnConnection !== undefined),
       this.activeTunnelId,
@@ -696,9 +699,10 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.stopRuntimeStatusPublishUpdates();
     this.lastForceHandshakeAt = 0;
     this.runningConfigFingerprint = '';
+    this.nativeTunnelDeathLogged = false;
 
     if (this.tunnelHandle !== 0) {
-      hilog.info(DOMAIN, TAG, 'stopping native tunnel');
+      hilog.info(DOMAIN, TAG, 'WgVpnExtension stopping native tunnel');
       NativeTunnel.stop(this.tunnelHandle);
       this.tunnelHandle = 0;
     }
@@ -717,7 +721,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       });
     }
 
-    hilog.info(DOMAIN, TAG, 'cleanup end');
+    hilog.info(DOMAIN, TAG, 'WgVpnExtension cleanup end');
   }
 
   private resetDataTransferNotificationState(): void {
@@ -764,6 +768,10 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     const stats = NativeTunnel.stats(this.tunnelHandle);
+    if (!this.isNativeTunnelAlive(stats)) {
+      await this.handleDeadNativeTunnel('dataTransferNotification', stats);
+      return;
+    }
     this.logNativePacketStats(stats);
     const txBytes = stats.txBytes;
     const rxBytes = stats.rxBytes;
@@ -946,7 +954,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'publishRuntimeStatus begin running=%{public}s includeStats=%{public}s activeId=%{public}s activeName=%{public}s handle=%{public}d',
+      'WgVpnExtension publishRuntimeStatus begin running=%{public}s includeStats=%{public}s activeId=%{public}s activeName=%{public}s handle=%{public}d',
       String(running),
       String(includeStats),
       this.activeTunnelId,
@@ -962,13 +970,18 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     if (running && includeStats && this.tunnelHandle !== 0) {
       try {
         const stats = NativeTunnel.stats(this.tunnelHandle);
-        txBytes = stats.txBytes;
-        rxBytes = stats.rxBytes;
-        latestHandshakeSeconds = stats.latestHandshakeSeconds;
-        latestPacketSentSeconds = stats.latestPacketSentSeconds;
-        loss = stats.loss;
-        rttMillis = stats.rttMillis;
-        this.logNativePacketStats(stats);
+        if (!this.isNativeTunnelAlive(stats)) {
+          await this.handleDeadNativeTunnel('publishRuntimeStatus', stats);
+          running = false;
+        } else {
+          txBytes = stats.txBytes;
+          rxBytes = stats.rxBytes;
+          latestHandshakeSeconds = stats.latestHandshakeSeconds;
+          latestPacketSentSeconds = stats.latestPacketSentSeconds;
+          loss = stats.loss;
+          rttMillis = stats.rttMillis;
+          this.logNativePacketStats(stats);
+        }
       } catch (err) {
         const error = err as BusinessError;
         hilog.warn(DOMAIN, TAG, 'read native stats failed: %{public}s', this.formatError(error));
@@ -1002,7 +1015,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'publishRuntimeStatus save running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
+      'WgVpnExtension publishRuntimeStatus save running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
       String(status.running),
       status.tunnelId,
       status.tunnelName,
@@ -1026,13 +1039,46 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(
       DOMAIN,
       TAG,
-      'native packet stats tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunReadLast=%{public}s tunWriteLast=%{public}s',
+      'WgVpnExtension native packet stats tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunReadLast=%{public}s tunWriteLast=%{public}s',
       stats.tunReadPackets,
       stats.tunDroppedPackets,
       stats.udpReadPackets,
       stats.tunReadLast,
       stats.tunWriteLast
     );
+  }
+
+  private isNativeTunnelAlive(stats: TunnelStats): boolean {
+    if (!stats.running) {
+      return false;
+    }
+    if (!stats.tunWorkerAlive || !stats.udpWorkerAlive) {
+      return false;
+    }
+    if (stats.lastTickSeconds >= 0 && stats.lastTickSeconds > NATIVE_TUNNEL_STALE_TICK_SECONDS) {
+      return false;
+    }
+    return true;
+  }
+
+  private async handleDeadNativeTunnel(reason: string, stats: TunnelStats): Promise<void> {
+    if (!this.nativeTunnelDeathLogged) {
+      hilog.error(
+        DOMAIN,
+        TAG,
+        'WgVpnExtension native tunnel dead reason=%{public}s handle=%{public}d running=%{public}s tunAlive=%{public}s udpAlive=%{public}s exitCode=%{public}d lastTickSeconds=%{public}s',
+        reason,
+        this.tunnelHandle,
+        String(stats.running),
+        String(stats.tunWorkerAlive),
+        String(stats.udpWorkerAlive),
+        stats.workerExitCode,
+        stats.lastTickSeconds.toFixed(3)
+      );
+      this.nativeTunnelDeathLogged = true;
+    }
+    await this.cleanup(false);
+    await this.publishRuntimeStatus(false, false);
   }
 
   private isRestoreWant(want: Want): boolean {

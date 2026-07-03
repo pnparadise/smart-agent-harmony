@@ -1,6 +1,14 @@
 declare module 'libwg_boringtun.so' {
   export interface NativeTunnelStats {
     running: boolean;
+    tun_worker_alive?: boolean;
+    udp_worker_alive?: boolean;
+    worker_exit_code?: number;
+    last_tick_seconds?: number;
+    tunWorkerAlive?: boolean;
+    udpWorkerAlive?: boolean;
+    workerExitCode?: number;
+    lastTickSeconds?: number;
     tx_bytes?: number;
     rx_bytes?: number;
     latest_handshake_seconds?: number;

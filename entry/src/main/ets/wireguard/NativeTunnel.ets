@@ -3,6 +3,10 @@ import { WireGuardConfig } from './WireGuardConfig';
 
 export interface TunnelStats {
   running: boolean;
+  tunWorkerAlive: boolean;
+  udpWorkerAlive: boolean;
+  workerExitCode: number;
+  lastTickSeconds: number;
   txBytes: number;
   rxBytes: number;
   latestHandshakeSeconds: number;
@@ -62,6 +66,10 @@ export class NativeTunnel {
     const stats: NativeTunnelStats = wgNative.getTunnelStats(handle);
     const tunnelStats: TunnelStats = {
       running: stats.running,
+      tunWorkerAlive: NativeTunnel.booleanValue(stats.tun_worker_alive, stats.tunWorkerAlive, false),
+      udpWorkerAlive: NativeTunnel.booleanValue(stats.udp_worker_alive, stats.udpWorkerAlive, false),
+      workerExitCode: NativeTunnel.numberValue(stats.worker_exit_code, stats.workerExitCode, 0),
+      lastTickSeconds: NativeTunnel.numberValue(stats.last_tick_seconds, stats.lastTickSeconds, -1),
       txBytes: NativeTunnel.numberValue(stats.tx_bytes, stats.txBytes, 0),
       rxBytes: NativeTunnel.numberValue(stats.rx_bytes, stats.rxBytes, 0),
       latestHandshakeSeconds: NativeTunnel.numberValue(
@@ -101,6 +109,16 @@ export class NativeTunnel {
       return primary;
     }
     if (secondary !== undefined && secondary.length > 0) {
+      return secondary;
+    }
+    return fallback;
+  }
+
+  private static booleanValue(primary: boolean | undefined, secondary: boolean | undefined, fallback: boolean): boolean {
+    if (primary !== undefined) {
+      return primary;
+    }
+    if (secondary !== undefined) {
       return secondary;
     }
     return fallback;

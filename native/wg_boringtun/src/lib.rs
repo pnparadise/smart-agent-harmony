@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,6 +42,10 @@ unsafe extern "C" {
 #[napi(object)]
 pub struct NativeTunnelStats {
     pub running: bool,
+    pub tun_worker_alive: bool,
+    pub udp_worker_alive: bool,
+    pub worker_exit_code: f64,
+    pub last_tick_seconds: f64,
     pub tx_bytes: f64,
     pub rx_bytes: f64,
     pub latest_handshake_seconds: f64,
@@ -63,6 +67,10 @@ struct TunnelRuntime {
     mtu: usize,
     persistent_keepalive_ms: u64,
     running: AtomicBool,
+    tun_worker_alive: AtomicBool,
+    udp_worker_alive: AtomicBool,
+    worker_exit_code: AtomicI32,
+    last_tick_ms: AtomicU64,
     last_network_send_ms: AtomicU64,
     tun_read_packets: AtomicU64,
     tun_dropped_packets: AtomicU64,
@@ -133,6 +141,10 @@ pub fn create_tunnel(
         mtu,
         persistent_keepalive_ms,
         running: AtomicBool::new(false),
+        tun_worker_alive: AtomicBool::new(false),
+        udp_worker_alive: AtomicBool::new(false),
+        worker_exit_code: AtomicI32::new(0),
+        last_tick_ms: AtomicU64::new(0),
         last_network_send_ms: AtomicU64::new(0),
         tun_read_packets: AtomicU64::new(0),
         tun_dropped_packets: AtomicU64::new(0),
@@ -187,7 +199,11 @@ pub fn get_tunnel_stats(handle: i32) -> Result<NativeTunnelStats> {
         .map_err(|_| error("packet summaries lock poisoned"))?;
 
     Ok(NativeTunnelStats {
-        running: runtime.running.load(Ordering::SeqCst),
+        running: runtime.is_running(),
+        tun_worker_alive: runtime.tun_worker_alive.load(Ordering::SeqCst),
+        udp_worker_alive: runtime.udp_worker_alive.load(Ordering::SeqCst),
+        worker_exit_code: runtime.worker_exit_code.load(Ordering::SeqCst) as f64,
+        last_tick_seconds: elapsed_seconds_since(runtime.last_tick_millis()),
         tx_bytes: tx as f64,
         rx_bytes: rx as f64,
         latest_handshake_seconds: handshake.map(|value| value.as_secs_f64()).unwrap_or(-1.0),
@@ -236,6 +252,9 @@ impl TunnelRuntime {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        self.tun_worker_alive.store(false, Ordering::SeqCst);
+        self.udp_worker_alive.store(false, Ordering::SeqCst);
+        self.worker_exit_code.store(0, Ordering::SeqCst);
 
         // The original TUN fd is owned by the HarmonyOS VpnConnection.
         // Keep it open so VpnConnection.destroy() can close the same fd it created.
@@ -297,32 +316,38 @@ impl TunnelRuntime {
         }
 
         let tun_read_runtime = self.clone();
+        self.tun_worker_alive.store(true, Ordering::SeqCst);
         let tun_worker = match thread::Builder::new()
             .name("wg-tun-reader".to_string())
             .spawn(move || {
                 let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
                 tun_read_runtime.tun_reader_loop(tun_for_read, tun_stop_read, socket_for_write);
+                tun_read_runtime.on_worker_exit(1);
             })
             .map_err(to_error) {
             Ok(worker) => worker,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.tun_worker_alive.store(false, Ordering::SeqCst);
                 let _ = self.set_timer_wake_fd(None);
                 return Err(err);
             }
         };
 
         let udp_runtime = self.clone();
+        self.udp_worker_alive.store(true, Ordering::SeqCst);
         let udp_worker = match thread::Builder::new()
             .name("wg-udp-reader".to_string())
             .spawn(move || {
                 let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
                 udp_runtime.udp_reader_loop(socket_for_read, udp_stop_read, tun_for_write);
+                udp_runtime.on_worker_exit(2);
             })
             .map_err(to_error) {
             Ok(worker) => worker,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.udp_worker_alive.store(false, Ordering::SeqCst);
                 let _ = self.set_timer_wake_fd(None);
                 let _ = write_stop_signal(tun_stop_write.as_raw_fd());
                 let _ = tun_worker.join();
@@ -334,6 +359,8 @@ impl TunnelRuntime {
             Ok(workers) => workers,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.tun_worker_alive.store(false, Ordering::SeqCst);
+                self.udp_worker_alive.store(false, Ordering::SeqCst);
                 let _ = self.set_timer_wake_fd(None);
                 let _ = write_stop_signal(tun_stop_write.as_raw_fd());
                 let _ = write_stop_signal(udp_stop_write.as_raw_fd());
@@ -346,6 +373,8 @@ impl TunnelRuntime {
             Ok(stop_writers) => stop_writers,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.tun_worker_alive.store(false, Ordering::SeqCst);
+                self.udp_worker_alive.store(false, Ordering::SeqCst);
                 let _ = self.set_timer_wake_fd(None);
                 let _ = write_stop_signal(tun_stop_write.as_raw_fd());
                 let _ = write_stop_signal(udp_stop_write.as_raw_fd());
@@ -367,6 +396,8 @@ impl TunnelRuntime {
 
     fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        self.tun_worker_alive.store(false, Ordering::SeqCst);
+        self.udp_worker_alive.store(false, Ordering::SeqCst);
         if let Ok(stop_writers) = self.stop_writers.lock() {
             for writer in stop_writers.iter() {
                 let _ = write_stop_signal(writer.as_raw_fd());
@@ -648,7 +679,39 @@ impl TunnelRuntime {
         }
     }
 
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst) &&
+            self.tun_worker_alive.load(Ordering::SeqCst) &&
+            self.udp_worker_alive.load(Ordering::SeqCst)
+    }
+
+    fn last_tick_millis(&self) -> u64 {
+        self.last_tick_ms.load(Ordering::SeqCst)
+    }
+
+    fn on_worker_exit(&self, worker_code: i32) {
+        if worker_code == 1 {
+            self.tun_worker_alive.store(false, Ordering::SeqCst);
+        } else if worker_code == 2 {
+            self.udp_worker_alive.store(false, Ordering::SeqCst);
+        }
+        self.worker_exit_code.compare_exchange(
+            0,
+            worker_code,
+            Ordering::SeqCst,
+            Ordering::SeqCst
+        ).ok();
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(stop_writers) = self.stop_writers.lock() {
+            for writer in stop_writers.iter() {
+                let _ = write_stop_signal(writer.as_raw_fd());
+            }
+        }
+        let _ = self.set_timer_wake_fd(None);
+    }
+
     fn bump_tick(&self) {
+        self.last_tick_ms.store(now_millis(), Ordering::SeqCst);
         self.tick_count.fetch_add(1, Ordering::SeqCst);
         GLOBAL_TICK_COUNT.fetch_add(1, Ordering::SeqCst);
     }
