@@ -38,6 +38,7 @@ export struct WebBrowserHost {
   @StorageProp('webBrowserBackgroundPipRevision') private backgroundPipRevision: number = 0;
   onClose: () => void = () => {};
   onFirstContentVisible: () => void = () => {};
+  onNavigationFailed: () => void = () => {};
   onBackHandlerReady: (handler: () => boolean) => void = () => {};
   onBackHandlerRelease: () => void = () => {};
   @State private instances: BrowserInstance[] = [];
@@ -99,6 +100,11 @@ export struct WebBrowserHost {
           onFirstContentVisible: () => {
             if (instance.id === this.activeInstanceId) {
               this.onFirstContentVisible();
+            }
+          },
+          onNavigationFailed: () => {
+            if (instance.id === this.activeInstanceId) {
+              this.onNavigationFailed();
             }
           },
           onBackHandlerReady: (handler: () => boolean) => {

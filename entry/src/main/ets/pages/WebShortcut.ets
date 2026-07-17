@@ -38,6 +38,9 @@ struct WebShortcut {
           onFirstContentVisible: () => {
             this.launchCoverVisible = false;
           },
+          onNavigationFailed: () => {
+            this.launchCoverVisible = false;
+          },
           onClose: () => {
             this.closeShortcut();
           },

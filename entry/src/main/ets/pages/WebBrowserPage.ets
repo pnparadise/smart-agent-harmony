@@ -548,6 +548,7 @@ export struct WebBrowserPage {
   @Prop clearTabStackFallbackUrlFromHost: string = '';
   onClose: () => void = () => {};
   onFirstContentVisible: () => void = () => {};
+  onNavigationFailed: () => void = () => {};
   onBackHandlerReady: (handler: () => boolean) => void = () => {};
   onBackHandlerRelease: () => void = () => {};
   onOpenBookmarkHome: () => void = () => {};
@@ -1416,6 +1417,7 @@ export struct WebBrowserPage {
       return;
     }
     this.showWebError(surfaceKey, event);
+    this.onNavigationFailed();
   }
 
   private installInlinePictureInPictureButton(surfaceKey: string): void {
