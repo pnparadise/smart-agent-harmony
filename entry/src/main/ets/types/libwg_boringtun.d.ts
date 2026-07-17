@@ -4,10 +4,18 @@ declare module 'libwg_boringtun.so' {
     tun_worker_alive?: boolean;
     udp_worker_alive?: boolean;
     worker_exit_code?: number;
+    last_error?: string;
+    last_event?: string;
+    last_worker?: string;
+    last_error_at_seconds?: number;
     last_tick_seconds?: number;
     tunWorkerAlive?: boolean;
     udpWorkerAlive?: boolean;
     workerExitCode?: number;
+    lastError?: string;
+    lastEvent?: string;
+    lastWorker?: string;
+    lastErrorAtSeconds?: number;
     lastTickSeconds?: number;
     tx_bytes?: number;
     rx_bytes?: number;

@@ -25,6 +25,14 @@ export interface TunnelRuntimeStatus {
   latestPacketSentSeconds: number;
   loss: number;
   rttMillis: number;
+  nativeWorkerExitCode: number;
+  nativeLastError: string;
+  nativeLastEvent: string;
+  nativeLastWorker: string;
+  nativeLastErrorAtSeconds: number;
+  nativeLastTickSeconds: number;
+  nativeTunReadLast: string;
+  nativeTunWriteLast: string;
   updatedAt: number;
 }
 
@@ -94,6 +102,14 @@ const STATUS_HANDSHAKE_KEY = 'wg_status_latest_handshake_seconds';
 const STATUS_PACKET_SENT_KEY = 'wg_status_latest_packet_sent_seconds';
 const STATUS_LOSS_KEY = 'wg_status_loss';
 const STATUS_RTT_KEY = 'wg_status_rtt_millis';
+const STATUS_NATIVE_WORKER_EXIT_CODE_KEY = 'wg_status_native_worker_exit_code';
+const STATUS_NATIVE_LAST_ERROR_KEY = 'wg_status_native_last_error';
+const STATUS_NATIVE_LAST_EVENT_KEY = 'wg_status_native_last_event';
+const STATUS_NATIVE_LAST_WORKER_KEY = 'wg_status_native_last_worker';
+const STATUS_NATIVE_LAST_ERROR_AT_KEY = 'wg_status_native_last_error_at_seconds';
+const STATUS_NATIVE_LAST_TICK_KEY = 'wg_status_native_last_tick_seconds';
+const STATUS_NATIVE_TUN_READ_LAST_KEY = 'wg_status_native_tun_read_last';
+const STATUS_NATIVE_TUN_WRITE_LAST_KEY = 'wg_status_native_tun_write_last';
 const STATUS_UPDATED_AT_KEY = 'wg_status_updated_at';
 const APP_SPLIT_ENABLED_KEY = 'wg_app_split_enabled';
 const APP_SPLIT_APPS_KEY = 'wg_app_split_apps';
@@ -125,7 +141,6 @@ export interface DohSettings {
 }
 
 type StoreContext = common.UIAbilityContext | common.VpnExtensionContext;
-
 export async function saveConfig(context: common.UIAbilityContext, value: string): Promise<void> {
   await saveActiveConfig(context, value);
 }
@@ -198,6 +213,14 @@ export async function saveTunnelRuntimeStatus(context: StoreContext, status: Tun
   const latestPacketSentSeconds = numberValue(status.latestPacketSentSeconds, -1);
   const loss = numberValue(status.loss, 0);
   const rttMillis = numberValue(status.rttMillis, -1);
+  const nativeWorkerExitCode = numberValue(status.nativeWorkerExitCode, 0);
+  const nativeLastError = stringValue(status.nativeLastError);
+  const nativeLastEvent = stringValue(status.nativeLastEvent);
+  const nativeLastWorker = stringValue(status.nativeLastWorker);
+  const nativeLastErrorAtSeconds = numberValue(status.nativeLastErrorAtSeconds, -1);
+  const nativeLastTickSeconds = numberValue(status.nativeLastTickSeconds, -1);
+  const nativeTunReadLast = stringValue(status.nativeTunReadLast);
+  const nativeTunWriteLast = stringValue(status.nativeTunWriteLast);
   const updatedAt = numberValue(status.updatedAt, Date.now());
 
   await store.put(STATUS_RUNNING_KEY, running);
@@ -209,19 +232,16 @@ export async function saveTunnelRuntimeStatus(context: StoreContext, status: Tun
   await store.put(STATUS_PACKET_SENT_KEY, latestPacketSentSeconds);
   await store.put(STATUS_LOSS_KEY, loss);
   await store.put(STATUS_RTT_KEY, rttMillis);
+  await store.put(STATUS_NATIVE_WORKER_EXIT_CODE_KEY, nativeWorkerExitCode);
+  await store.put(STATUS_NATIVE_LAST_ERROR_KEY, nativeLastError);
+  await store.put(STATUS_NATIVE_LAST_EVENT_KEY, nativeLastEvent);
+  await store.put(STATUS_NATIVE_LAST_WORKER_KEY, nativeLastWorker);
+  await store.put(STATUS_NATIVE_LAST_ERROR_AT_KEY, nativeLastErrorAtSeconds);
+  await store.put(STATUS_NATIVE_LAST_TICK_KEY, nativeLastTickSeconds);
+  await store.put(STATUS_NATIVE_TUN_READ_LAST_KEY, nativeTunReadLast);
+  await store.put(STATUS_NATIVE_TUN_WRITE_LAST_KEY, nativeTunWriteLast);
   await store.put(STATUS_UPDATED_AT_KEY, updatedAt);
   await store.flush();
-  hilog.info(
-    DOMAIN,
-    TAG,
-    'save runtime status running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
-    String(running),
-    tunnelId,
-    tunnelName,
-    txBytes,
-    rxBytes,
-    updatedAt
-  );
 }
 
 export async function saveDataTransferNotificationId(context: StoreContext, notificationId: number): Promise<void> {
@@ -259,6 +279,14 @@ export async function loadTunnelRuntimeStatus(
     latestPacketSentSeconds: await store.get(STATUS_PACKET_SENT_KEY, -1) as number,
     loss: await store.get(STATUS_LOSS_KEY, 0) as number,
     rttMillis: await store.get(STATUS_RTT_KEY, -1) as number,
+    nativeWorkerExitCode: await store.get(STATUS_NATIVE_WORKER_EXIT_CODE_KEY, 0) as number,
+    nativeLastError: await store.get(STATUS_NATIVE_LAST_ERROR_KEY, '') as string,
+    nativeLastEvent: await store.get(STATUS_NATIVE_LAST_EVENT_KEY, '') as string,
+    nativeLastWorker: await store.get(STATUS_NATIVE_LAST_WORKER_KEY, '') as string,
+    nativeLastErrorAtSeconds: await store.get(STATUS_NATIVE_LAST_ERROR_AT_KEY, -1) as number,
+    nativeLastTickSeconds: await store.get(STATUS_NATIVE_LAST_TICK_KEY, -1) as number,
+    nativeTunReadLast: await store.get(STATUS_NATIVE_TUN_READ_LAST_KEY, '') as string,
+    nativeTunWriteLast: await store.get(STATUS_NATIVE_TUN_WRITE_LAST_KEY, '') as string,
     updatedAt: await store.get(STATUS_UPDATED_AT_KEY, 0) as number
   };
   return status;
@@ -325,6 +353,34 @@ export function buildSmartAgentSwitchLogEntry(
     id: createAgentLogId('smart_agent_switch', normalizedTime),
     title: '策略切换',
     subtitle: '触发：' + normalizedTriggerReason(trigger) + '，' + normalizedFrom + ' -> ' + normalizedTo,
+    createdAt: normalizedTime
+  };
+  return entry;
+}
+
+export function buildVpnNativeFailureLogEntry(
+  tunnelName: string,
+  reason: string,
+  workerExitCode: number,
+  lastWorker: string,
+  lastEvent: string,
+  lastError: string,
+  createdAt: number = Date.now()
+): AgentLogEntry {
+  const timestamp = numberValue(createdAt, Date.now());
+  const normalizedTime = timestamp <= 0 ? Date.now() : timestamp;
+  const normalizedReason = stringValue(reason).trim().length > 0 ? stringValue(reason).trim() : 'unknown';
+  const normalizedWorker = stringValue(lastWorker).trim().length > 0 ? stringValue(lastWorker).trim() : 'unknown';
+  const normalizedEvent = stringValue(lastEvent).trim().length > 0 ? stringValue(lastEvent).trim() : 'unknown';
+  const normalizedError = stringValue(lastError).trim().length > 0 ? stringValue(lastError).trim() : 'none';
+  const entry: AgentLogEntry = {
+    id: createAgentLogId('vpn_native_failure', normalizedTime),
+    title: '原生隧道异常退出',
+    subtitle: normalizedLogTunnelName(tunnelName) + ' · 原因：' + normalizedReason +
+      ' · worker=' + normalizedWorker +
+      ' · event=' + normalizedEvent +
+      ' · exit=' + String(numberValue(workerExitCode, 0)) +
+      ' · error=' + normalizedError,
     createdAt: normalizedTime
   };
   return entry;

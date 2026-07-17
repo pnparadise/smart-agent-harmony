@@ -37,6 +37,7 @@ export struct WebBrowserHost {
   @Prop @Watch('onLaunchTargetChanged') launchRevision: number = 0;
   @StorageProp('webBrowserBackgroundPipRevision') private backgroundPipRevision: number = 0;
   onClose: () => void = () => {};
+  onFirstContentVisible: () => void = () => {};
   onBackHandlerReady: (handler: () => boolean) => void = () => {};
   onBackHandlerRelease: () => void = () => {};
   @State private instances: BrowserInstance[] = [];
@@ -94,6 +95,11 @@ export struct WebBrowserHost {
           tabBackCountFromHost: (bookmarkId: string): number => this.tabBackCount(bookmarkId),
           onClose: () => {
             this.onClose();
+          },
+          onFirstContentVisible: () => {
+            if (instance.id === this.activeInstanceId) {
+              this.onFirstContentVisible();
+            }
           },
           onBackHandlerReady: (handler: () => boolean) => {
             this.setBackHandler(instance.id, handler);

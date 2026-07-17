@@ -98,7 +98,6 @@ const PRESET_SPLIT_APPS: SplitAppInfo[] = [
 @Component
 struct Index {
   @StorageProp('topRectHeight') private topRectHeight: number = 0;
-  @StorageProp('bottomRectHeight') private bottomRectHeight: number = 0;
   @State private tunnels: TunnelConfig[] = [];
   @State private statusText: string = 'Idle';
   @State private busy: boolean = false;
@@ -560,10 +559,8 @@ struct Index {
         .animation({ duration: this.tabIndicatorAnimationDuration, curve: Curve.EaseInOut })
     }
     .width('100%')
-    .height(this.bottomBarHeight())
+    .height(54)
     .backgroundColor(CARD_BACKGROUND)
-    .padding({ bottom: this.navigationBarPadding() })
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.tabBarWidth = Number(newValue.width);
     })
@@ -1529,7 +1526,6 @@ struct Index {
         this.vpnEnabled = true;
         const reconnectingName = this.resolveRuntimeTunnelName(status, this.activeTunnelId, this.runtimeTunnelName);
         this.statusText = reconnectingName.length > 0 ? 'Reconnecting: ' + reconnectingName : 'Reconnecting';
-        hilog.warn(DOMAIN, TAG, 'ignore transient stopped runtime during grace age=%{public}d', this.runtimeStatusAge(status));
       } else if (wasRunning && !running && !this.busy && this.runtimeConfirmedRunning) {
         this.runtimeConfirmedRunning = false;
         await this.stopVpnContinuousTask(context, 'runtime stopped');
@@ -1726,14 +1722,6 @@ struct Index {
     return this.avoidAreaPaddingVp(this.topRectHeight);
   }
 
-  private navigationBarPadding(): number {
-    return this.avoidAreaPaddingVp(this.bottomRectHeight);
-  }
-
-  private bottomBarHeight(): number {
-    return 54 + this.navigationBarPadding();
-  }
-
   private avoidAreaPaddingVp(value: number): number {
     if (value <= 0) {
       return 0;
@@ -1793,6 +1781,14 @@ struct Index {
       latestPacketSentSeconds: -1,
       loss: 0,
       rttMillis: -1,
+      nativeWorkerExitCode: 0,
+      nativeLastError: '',
+      nativeLastEvent: '',
+      nativeLastWorker: '',
+      nativeLastErrorAtSeconds: -1,
+      nativeLastTickSeconds: -1,
+      nativeTunReadLast: '',
+      nativeTunWriteLast: '',
       updatedAt: Date.now()
     };
     return status;
@@ -1809,6 +1805,14 @@ struct Index {
       latestPacketSentSeconds: -1,
       loss: 0,
       rttMillis: -1,
+      nativeWorkerExitCode: 0,
+      nativeLastError: '',
+      nativeLastEvent: '',
+      nativeLastWorker: '',
+      nativeLastErrorAtSeconds: -1,
+      nativeLastTickSeconds: -1,
+      nativeTunReadLast: '',
+      nativeTunWriteLast: '',
       updatedAt: Date.now()
     };
     return status;
@@ -1825,6 +1829,14 @@ struct Index {
       latestPacketSentSeconds: -1,
       loss: 0,
       rttMillis: -1,
+      nativeWorkerExitCode: 0,
+      nativeLastError: '',
+      nativeLastEvent: '',
+      nativeLastWorker: '',
+      nativeLastErrorAtSeconds: -1,
+      nativeLastTickSeconds: -1,
+      nativeTunReadLast: '',
+      nativeTunWriteLast: '',
       updatedAt: Date.now()
     };
     return status;

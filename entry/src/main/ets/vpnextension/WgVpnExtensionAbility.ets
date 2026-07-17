@@ -7,6 +7,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   ActiveTunnelInfo,
   appendAgentLog,
+  buildVpnNativeFailureLogEntry,
   buildSmartAgentSwitchLogEntry,
   buildVpnRestartLogEntry,
   DEFAULT_DOH_PROVIDER,
@@ -41,7 +42,6 @@ const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 5000;
 const RUNTIME_STATUS_PUBLISH_INTERVAL_MS = 3000;
 const WANT_ACTION_RESTORE = 'restore';
 const DOH_RESOLVE_TIMEOUT_MS = 8000;
-const NATIVE_TUNNEL_STALE_TICK_SECONDS = 12;
 
 interface DnsJsonAnswer {
   data?: string;
@@ -951,16 +951,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async publishRuntimeStatus(running: boolean, includeStats: boolean): Promise<void> {
-    hilog.info(
-      DOMAIN,
-      TAG,
-      'WgVpnExtension publishRuntimeStatus begin running=%{public}s includeStats=%{public}s activeId=%{public}s activeName=%{public}s handle=%{public}d',
-      String(running),
-      String(includeStats),
-      this.activeTunnelId,
-      this.activeTunnelName,
-      this.tunnelHandle
-    );
     let txBytes = 0;
     let rxBytes = 0;
     let latestHandshakeSeconds = -1;
@@ -1010,19 +1000,32 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       latestPacketSentSeconds: latestPacketSentSeconds,
       loss: loss,
       rttMillis: rttMillis,
+      nativeWorkerExitCode: 0,
+      nativeLastError: '',
+      nativeLastEvent: '',
+      nativeLastWorker: '',
+      nativeLastErrorAtSeconds: -1,
+      nativeLastTickSeconds: -1,
+      nativeTunReadLast: '',
+      nativeTunWriteLast: '',
       updatedAt: Date.now()
     };
-    hilog.info(
-      DOMAIN,
-      TAG,
-      'WgVpnExtension publishRuntimeStatus save running=%{public}s tunnelId=%{public}s tunnelName=%{public}s tx=%{public}d rx=%{public}d updatedAt=%{public}d',
-      String(status.running),
-      status.tunnelId,
-      status.tunnelName,
-      status.txBytes,
-      status.rxBytes,
-      status.updatedAt
-    );
+    if (includeStats && this.tunnelHandle !== 0) {
+      try {
+        const diagnosticStats = NativeTunnel.stats(this.tunnelHandle);
+        status.nativeWorkerExitCode = diagnosticStats.workerExitCode;
+        status.nativeLastError = diagnosticStats.lastError;
+        status.nativeLastEvent = diagnosticStats.lastEvent;
+        status.nativeLastWorker = diagnosticStats.lastWorker;
+        status.nativeLastErrorAtSeconds = diagnosticStats.lastErrorAtSeconds;
+        status.nativeLastTickSeconds = diagnosticStats.lastTickSeconds;
+        status.nativeTunReadLast = diagnosticStats.tunReadLast;
+        status.nativeTunWriteLast = diagnosticStats.tunWriteLast;
+      } catch (err) {
+        const error = err as BusinessError;
+        hilog.warn(DOMAIN, TAG, 'read native diagnostic stats failed: %{public}s', this.formatError(error));
+      }
+    }
     await saveTunnelRuntimeStatus(this.context as common.VpnExtensionContext, status);
   }
 
@@ -1036,16 +1039,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.lastLoggedTunReadPackets = stats.tunReadPackets;
     this.lastLoggedTunDroppedPackets = stats.tunDroppedPackets;
     this.lastLoggedUdpReadPackets = stats.udpReadPackets;
-    hilog.info(
-      DOMAIN,
-      TAG,
-      'WgVpnExtension native packet stats tunRead=%{public}d tunDropped=%{public}d udpRead=%{public}d tunReadLast=%{public}s tunWriteLast=%{public}s',
-      stats.tunReadPackets,
-      stats.tunDroppedPackets,
-      stats.udpReadPackets,
-      stats.tunReadLast,
-      stats.tunWriteLast
-    );
   }
 
   private isNativeTunnelAlive(stats: TunnelStats): boolean {
@@ -1053,9 +1046,6 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       return false;
     }
     if (!stats.tunWorkerAlive || !stats.udpWorkerAlive) {
-      return false;
-    }
-    if (stats.lastTickSeconds >= 0 && stats.lastTickSeconds > NATIVE_TUNNEL_STALE_TICK_SECONDS) {
       return false;
     }
     return true;
@@ -1066,15 +1056,32 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(
         DOMAIN,
         TAG,
-        'WgVpnExtension native tunnel dead reason=%{public}s handle=%{public}d running=%{public}s tunAlive=%{public}s udpAlive=%{public}s exitCode=%{public}d lastTickSeconds=%{public}s',
+        'WgVpnExtension native tunnel dead reason=%{public}s handle=%{public}d running=%{public}s tunAlive=%{public}s udpAlive=%{public}s exitCode=%{public}d lastWorker=%{public}s lastEvent=%{public}s lastError=%{public}s lastTickSeconds=%{public}s',
         reason,
         this.tunnelHandle,
         String(stats.running),
         String(stats.tunWorkerAlive),
         String(stats.udpWorkerAlive),
         stats.workerExitCode,
+        stats.lastWorker,
+        stats.lastEvent,
+        stats.lastError,
         stats.lastTickSeconds.toFixed(3)
       );
+      appendAgentLog(
+        this.context as common.VpnExtensionContext,
+        buildVpnNativeFailureLogEntry(
+          this.activeTunnelName,
+          reason,
+          stats.workerExitCode,
+          stats.lastWorker,
+          stats.lastEvent,
+          stats.lastError,
+          Date.now()
+        )
+      ).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'append native failure log failed: %{public}s', this.formatError(err));
+      });
       this.nativeTunnelDeathLogged = true;
     }
     await this.cleanup(false);

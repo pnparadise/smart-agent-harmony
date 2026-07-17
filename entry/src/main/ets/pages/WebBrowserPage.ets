@@ -547,6 +547,7 @@ export struct WebBrowserPage {
   @Prop clearTabStackTargetIdFromHost: string = '';
   @Prop clearTabStackFallbackUrlFromHost: string = '';
   onClose: () => void = () => {};
+  onFirstContentVisible: () => void = () => {};
   onBackHandlerReady: (handler: () => boolean) => void = () => {};
   onBackHandlerRelease: () => void = () => {};
   onOpenBookmarkHome: () => void = () => {};
@@ -621,6 +622,7 @@ export struct WebBrowserPage {
   private addressSuggestionLoadVersion: number = 0;
   private handledClearTabStackRevision: number = 0;
   private handledBackgroundPipRevision: number = 0;
+  private firstContentVisibleNotified: boolean = false;
   @State private webSurfaceKeys: string[] = [];
   @State private webSurfaceKey: string = WEB_HOME_TAB_ID + '_0';
   private webSurfaceRegistry: WebBrowserSurfaceRegistry = new WebBrowserSurfaceRegistry();
@@ -645,6 +647,8 @@ export struct WebBrowserPage {
     this.refreshAddressSuggestions();
     if (!this.bookmarkHomeVisible) {
       this.prepareShortcut(startUrl);
+    } else {
+      this.notifyFirstContentVisible();
     }
     this.onBackHandlerReady((): boolean => {
       return this.handleBackNavigation();
@@ -1091,6 +1095,7 @@ export struct WebBrowserPage {
     this.syncSurfaceTabStackSize(surfaceKey);
     this.persistWebState();
     this.installInlinePictureInPictureButton(surfaceKey);
+    this.notifyFirstContentVisible();
   }
 
   private handleWebSurfacePageEnd(surfaceKey: string, url: string): void {
@@ -1174,10 +1179,6 @@ export struct WebBrowserPage {
     if (surface === undefined) {
       return;
     }
-    if (surface.scrollY > 1 && surface.pullRefresh.tracking && !surface.pullRefresh.refreshing) {
-      WebPullRefresh.reset(surface.pullRefresh);
-      this.bumpPullRefreshRevision();
-    }
     if (surface.scrollY > 1) {
       surface.pullRefresh.gestureOverScrollActive = false;
     }
@@ -1236,13 +1237,13 @@ export struct WebBrowserPage {
         this.currentScrollY(surfaceKey) > 1) {
         return;
       }
-      WebPullRefresh.beginTracking(pullRefresh, event.offsetY);
+      WebPullRefresh.beginTracking(pullRefresh);
     }
-    if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled || this.currentScrollY(surfaceKey) > 1) {
+    if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled) {
       this.resetPullRefresh(surfaceKey);
       return;
     }
-    this.updatePullRefresh(surfaceKey, event.offsetY - pullRefresh.gesturePullStartOffsetY);
+    this.updatePullRefresh(surfaceKey, event.offsetY);
   }
 
   private handleWebSurfacePullGestureEnd(surfaceKey: string): void {
@@ -1351,13 +1352,13 @@ export struct WebBrowserPage {
       if (offsetY <= 0) {
         return;
       }
-      WebPullRefresh.beginTracking(pullRefresh, offsetY);
+      WebPullRefresh.beginTracking(pullRefresh);
     }
     if (offsetY <= 0) {
       this.resetPullRefresh(this.webSurfaceKey);
       return;
     }
-    this.updatePullRefresh(this.webSurfaceKey, offsetY - pullRefresh.gesturePullStartOffsetY);
+    this.updatePullRefresh(this.webSurfaceKey, offsetY);
   }
 
   private handleWebErrorPullRefreshEnd(): void {
@@ -1789,6 +1790,7 @@ export struct WebBrowserPage {
     this.installInlinePictureInPictureButton(surfaceKey);
     this.installBrowserPullRefreshTouchProbe(surfaceKey);
     this.probeBrowserPullRefreshPolicy(surfaceKey);
+    this.notifyFirstContentVisible();
   }
 
   private saveWebCookies(): void {
@@ -1819,6 +1821,7 @@ export struct WebBrowserPage {
     const startUrl = this.normalizeUrl(tabState.url);
     this.currentUrl = startUrl;
     this.setAddressText(startUrl);
+    this.firstContentVisibleNotified = false;
     this.resetInstanceWebController();
     if (isBookmarkHome) {
       this.loading = false;
@@ -1830,6 +1833,7 @@ export struct WebBrowserPage {
       this.resetPullRefresh();
       this.rememberBookmarkHomeState();
       this.loadBookmarks();
+      this.notifyFirstContentVisible();
       return;
     }
     this.prepareShortcut(startUrl);
@@ -1846,6 +1850,7 @@ export struct WebBrowserPage {
     this.rememberCurrentTabState();
     this.persistWebState();
     this.instanceId = nextId;
+    this.firstContentVisibleNotified = false;
     this.resetInstanceWebController();
   }
 
@@ -1870,6 +1875,7 @@ export struct WebBrowserPage {
     }
     this.bookmarkHomeVisible = nextBookmarkHomeVisible;
     this.updateWebSurfaceVisibility();
+    this.firstContentVisibleNotified = false;
     if (this.bookmarkHomeVisible) {
       this.saveWebCookies();
       this.clearActiveNavigation();
@@ -1882,6 +1888,7 @@ export struct WebBrowserPage {
       this.resetPullRefresh();
       this.rememberBookmarkHomeState();
       this.loadBookmarks();
+      this.notifyFirstContentVisible();
       return;
     }
     this.syncUrlFromController();
@@ -3106,6 +3113,7 @@ export struct WebBrowserPage {
     this.resetPullRefresh();
     this.rememberBookmarkHomeState();
     this.loadBookmarks();
+    this.notifyFirstContentVisible();
   }
 
   private openHomeTab(): void {
@@ -3160,6 +3168,14 @@ export struct WebBrowserPage {
       return source;
     }
     return $r('app.media.ic_browser_shortcut');
+  }
+
+  private notifyFirstContentVisible(): void {
+    if (this.firstContentVisibleNotified) {
+      return;
+    }
+    this.firstContentVisibleNotified = true;
+    this.onFirstContentVisible();
   }
 
   private bookmarkIconFileSource(url: string): string {

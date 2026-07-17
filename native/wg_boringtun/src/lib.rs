@@ -45,6 +45,10 @@ pub struct NativeTunnelStats {
     pub tun_worker_alive: bool,
     pub udp_worker_alive: bool,
     pub worker_exit_code: f64,
+    pub last_error: String,
+    pub last_event: String,
+    pub last_worker: String,
+    pub last_error_at_seconds: f64,
     pub last_tick_seconds: f64,
     pub tx_bytes: f64,
     pub rx_bytes: f64,
@@ -70,6 +74,7 @@ struct TunnelRuntime {
     tun_worker_alive: AtomicBool,
     udp_worker_alive: AtomicBool,
     worker_exit_code: AtomicI32,
+    last_error_at_ms: AtomicU64,
     last_tick_ms: AtomicU64,
     last_network_send_ms: AtomicU64,
     tun_read_packets: AtomicU64,
@@ -77,6 +82,7 @@ struct TunnelRuntime {
     udp_read_packets: AtomicU64,
     tun_write_packets: AtomicU64,
     packet_summaries: Mutex<PacketSummaries>,
+    diagnostics: Mutex<RuntimeDiagnostics>,
     tick_count: AtomicU64,
     timer_state: Mutex<TimerState>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -91,6 +97,12 @@ struct TimerState {
 struct PacketSummaries {
     tun_read_last: String,
     tun_write_last: String,
+}
+
+struct RuntimeDiagnostics {
+    last_error: String,
+    last_event: String,
+    last_worker: String,
 }
 
 #[napi]
@@ -144,6 +156,7 @@ pub fn create_tunnel(
         tun_worker_alive: AtomicBool::new(false),
         udp_worker_alive: AtomicBool::new(false),
         worker_exit_code: AtomicI32::new(0),
+        last_error_at_ms: AtomicU64::new(0),
         last_tick_ms: AtomicU64::new(0),
         last_network_send_ms: AtomicU64::new(0),
         tun_read_packets: AtomicU64::new(0),
@@ -153,6 +166,11 @@ pub fn create_tunnel(
         packet_summaries: Mutex::new(PacketSummaries {
             tun_read_last: String::new(),
             tun_write_last: String::new(),
+        }),
+        diagnostics: Mutex::new(RuntimeDiagnostics {
+            last_error: String::new(),
+            last_event: "created".to_string(),
+            last_worker: String::new(),
         }),
         tick_count: AtomicU64::new(0),
         timer_state: Mutex::new(TimerState {
@@ -203,6 +221,12 @@ pub fn get_tunnel_stats(handle: i32) -> Result<NativeTunnelStats> {
         tun_worker_alive: runtime.tun_worker_alive.load(Ordering::SeqCst),
         udp_worker_alive: runtime.udp_worker_alive.load(Ordering::SeqCst),
         worker_exit_code: runtime.worker_exit_code.load(Ordering::SeqCst) as f64,
+        last_error: runtime.last_error(),
+        last_event: runtime.last_event(),
+        last_worker: runtime.last_worker(),
+        last_error_at_seconds: elapsed_seconds_since(
+            runtime.last_error_at_ms.load(Ordering::SeqCst),
+        ),
         last_tick_seconds: elapsed_seconds_since(runtime.last_tick_millis()),
         tx_bytes: tx as f64,
         rx_bytes: rx as f64,
@@ -255,11 +279,15 @@ impl TunnelRuntime {
         self.tun_worker_alive.store(false, Ordering::SeqCst);
         self.udp_worker_alive.store(false, Ordering::SeqCst);
         self.worker_exit_code.store(0, Ordering::SeqCst);
+        self.last_error_at_ms.store(0, Ordering::SeqCst);
+        self.set_event("start_requested", "runtime");
+        self.set_error("", "runtime");
 
         // The original TUN fd is owned by the HarmonyOS VpnConnection.
         // Keep it open so VpnConnection.destroy() can close the same fd it created.
         if let Err(err) = set_nonblocking(tun_fd, true) {
             self.running.store(false, Ordering::SeqCst);
+            self.record_error("runtime", "set_nonblocking(tun_fd)", &err);
             return Err(err);
         }
         let tun_for_read = unsafe { libc::dup(tun_fd) };
@@ -268,17 +296,21 @@ impl TunnelRuntime {
             self.running.store(false, Ordering::SeqCst);
             close_if_valid(tun_for_read);
             close_if_valid(tun_for_write);
-            return Err(to_error(io::Error::last_os_error()));
+            let err = to_error(io::Error::last_os_error());
+            self.record_error_message("runtime", "dup tun fd", &err.reason);
+            return Err(err);
         }
         let tun_for_read = unsafe { OwnedFd::from_raw_fd(tun_for_read) };
         let tun_for_write = unsafe { OwnedFd::from_raw_fd(tun_for_write) };
 
         if let Err(err) = set_nonblocking(tun_for_read.as_raw_fd(), true) {
             self.running.store(false, Ordering::SeqCst);
+            self.record_error("runtime", "set_nonblocking(tun_for_read)", &err);
             return Err(err);
         }
         if let Err(err) = set_nonblocking(tun_for_write.as_raw_fd(), true) {
             self.running.store(false, Ordering::SeqCst);
+            self.record_error("runtime", "set_nonblocking(tun_for_write)", &err);
             return Err(err);
         }
 
@@ -286,6 +318,7 @@ impl TunnelRuntime {
             Ok(socket) => socket,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.record_error("runtime", "socket.try_clone(read)", &err);
                 return Err(err);
             }
         };
@@ -293,6 +326,7 @@ impl TunnelRuntime {
             Ok(socket) => socket,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.record_error("runtime", "socket.try_clone(write)", &err);
                 return Err(err);
             }
         };
@@ -300,6 +334,7 @@ impl TunnelRuntime {
             Ok(pipe) => pipe,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.record_error("runtime", "create_pipe(tun)", &err);
                 return Err(err);
             }
         };
@@ -307,11 +342,13 @@ impl TunnelRuntime {
             Ok(pipe) => pipe,
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
+                self.record_error("runtime", "create_pipe(udp)", &err);
                 return Err(err);
             }
         };
         if let Err(err) = self.set_timer_wake_fd(Some(udp_stop_write.as_raw_fd())) {
             self.running.store(false, Ordering::SeqCst);
+            self.record_error("runtime", "set_timer_wake_fd(start)", &err);
             return Err(err);
         }
 
@@ -321,6 +358,7 @@ impl TunnelRuntime {
             .name("wg-tun-reader".to_string())
             .spawn(move || {
                 let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
+                tun_read_runtime.set_event("thread_started", "tun");
                 tun_read_runtime.tun_reader_loop(tun_for_read, tun_stop_read, socket_for_write);
                 tun_read_runtime.on_worker_exit(1);
             })
@@ -330,6 +368,7 @@ impl TunnelRuntime {
                 self.running.store(false, Ordering::SeqCst);
                 self.tun_worker_alive.store(false, Ordering::SeqCst);
                 let _ = self.set_timer_wake_fd(None);
+                self.record_error("runtime", "spawn(tun_worker)", &err);
                 return Err(err);
             }
         };
@@ -340,6 +379,7 @@ impl TunnelRuntime {
             .name("wg-udp-reader".to_string())
             .spawn(move || {
                 let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
+                udp_runtime.set_event("thread_started", "udp");
                 udp_runtime.udp_reader_loop(socket_for_read, udp_stop_read, tun_for_write);
                 udp_runtime.on_worker_exit(2);
             })
@@ -351,6 +391,7 @@ impl TunnelRuntime {
                 let _ = self.set_timer_wake_fd(None);
                 let _ = write_stop_signal(tun_stop_write.as_raw_fd());
                 let _ = tun_worker.join();
+                self.record_error("runtime", "spawn(udp_worker)", &err);
                 return Err(err);
             }
         };
@@ -366,6 +407,7 @@ impl TunnelRuntime {
                 let _ = write_stop_signal(udp_stop_write.as_raw_fd());
                 let _ = tun_worker.join();
                 let _ = udp_worker.join();
+                self.record_error("runtime", "lock_workers", &err);
                 return Err(err);
             }
         };
@@ -380,6 +422,7 @@ impl TunnelRuntime {
                 let _ = write_stop_signal(udp_stop_write.as_raw_fd());
                 let _ = tun_worker.join();
                 let _ = udp_worker.join();
+                self.record_error("runtime", "lock_stop_writers", &err);
                 return Err(err);
             }
         };
@@ -391,10 +434,12 @@ impl TunnelRuntime {
         drop(workers);
         self.schedule_persistent_keepalive();
         self.send_initial_handshake();
+        self.set_event("start_completed", "runtime");
         Ok(())
     }
 
     fn stop(&self) {
+        self.set_event("stop_requested", "runtime");
         self.running.store(false, Ordering::SeqCst);
         self.tun_worker_alive.store(false, Ordering::SeqCst);
         self.udp_worker_alive.store(false, Ordering::SeqCst);
@@ -421,15 +466,24 @@ impl TunnelRuntime {
         while self.running.load(Ordering::SeqCst) {
             match poll_readable_or_stop(tun_fd.as_raw_fd(), stop_fd.as_raw_fd(), -1) {
                 Ok(PollOutcome::Ready) => {}
-                Ok(PollOutcome::Stopped) => break,
+                Ok(PollOutcome::Stopped) => {
+                    self.set_event("poll_stopped", "tun");
+                    break;
+                }
                 Ok(PollOutcome::TimedOut) => continue,
                 Err(err) if is_retry(&err) => continue,
-                Err(_) => break,
+                Err(err) => {
+                    self.record_io_error("tun", "poll_readable_or_stop", &err);
+                    break;
+                }
             }
             self.bump_tick();
 
             match read_fd(tun_fd.as_raw_fd(), &mut packet) {
-                Ok(0) => continue,
+                Ok(0) => {
+                    self.set_event("tun_read_eof", "tun");
+                    continue;
+                }
                 Ok(size) => {
                     self.tun_read_packets.fetch_add(1, Ordering::SeqCst);
                     self.set_tun_read_last(&packet[..size]);
@@ -441,14 +495,20 @@ impl TunnelRuntime {
                     let result = {
                         let mut tunn = match self.lock_tunn() {
                             Ok(tunn) => tunn,
-                            Err(_) => break,
+                            Err(err) => {
+                                self.record_error("tun", "lock_tunn(encapsulate)", &err);
+                                break;
+                            }
                         };
                         tunn.encapsulate(&packet[..size], &mut out)
                     };
                     self.handle_tunn_result(result, &socket, None);
                 }
                 Err(err) if is_retry(&err) => continue,
-                Err(_) => break,
+                Err(err) => {
+                    self.record_io_error("tun", "read_fd(tun)", &err);
+                    break;
+                }
             }
         }
     }
@@ -468,8 +528,10 @@ impl TunnelRuntime {
                 }
                 Ok(PollOutcome::Stopped) => {
                     if self.running.load(Ordering::SeqCst) {
+                        self.set_event("poll_stopped_while_running", "udp");
                         continue;
                     }
+                    self.set_event("poll_stopped", "udp");
                     break;
                 }
                 Ok(PollOutcome::TimedOut) => {
@@ -478,12 +540,16 @@ impl TunnelRuntime {
                     continue;
                 }
                 Err(err) if is_retry(&err) => continue,
-                Err(_) => break,
+                Err(err) => {
+                    self.record_io_error("udp", "poll_readable_or_stop", &err);
+                    break;
+                }
             }
 
             match socket.recv_from(&mut datagram) {
                 Ok((size, src)) => {
                     if src != self.peer_addr {
+                        self.set_event("udp_packet_ignored_peer_mismatch", "udp");
                         continue;
                     }
                     self.udp_read_packets.fetch_add(1, Ordering::SeqCst);
@@ -492,7 +558,10 @@ impl TunnelRuntime {
                     let result = {
                         let mut tunn = match self.lock_tunn() {
                             Ok(tunn) => tunn,
-                            Err(_) => break,
+                            Err(err) => {
+                                self.record_error("udp", "lock_tunn(decapsulate)", &err);
+                                break;
+                            }
                         };
                         tunn.decapsulate(Some(src.ip()), &datagram[..size], &mut out)
                     };
@@ -502,7 +571,10 @@ impl TunnelRuntime {
                         let result = {
                             let mut tunn = match self.lock_tunn() {
                                 Ok(tunn) => tunn,
-                                Err(_) => break 'udp_loop,
+                                Err(err) => {
+                                    self.record_error("udp", "lock_tunn(decapsulate_flush)", &err);
+                                    break 'udp_loop;
+                                }
                             };
                             tunn.decapsulate(Some(src.ip()), &[], &mut out)
                         };
@@ -517,7 +589,10 @@ impl TunnelRuntime {
                     }
                 }
                 Err(err) if is_retry(&err) => continue,
-                Err(_) => break,
+                Err(err) => {
+                    self.record_io_error("udp", "recv_from", &err);
+                    break;
+                }
             }
 
             self.handle_due_timers(&socket, &mut out);
@@ -529,7 +604,10 @@ impl TunnelRuntime {
         let result = {
             let mut tunn = match self.lock_tunn() {
                 Ok(tunn) => tunn,
-                Err(_) => return,
+                Err(err) => {
+                    self.record_error("runtime", "lock_tunn(send_initial_handshake)", &err);
+                    return;
+                }
             };
             tunn.format_handshake_initiation(&mut out, false)
         };
@@ -542,6 +620,7 @@ impl TunnelRuntime {
             let mut tunn = self.lock_tunn()?;
             tunn.format_handshake_initiation(&mut out, true)
         };
+        self.set_event("force_handshake_requested", "runtime");
         let _ = self.handle_tunn_result(result, &self.socket, None);
         Ok(())
     }
@@ -554,23 +633,37 @@ impl TunnelRuntime {
     ) -> bool {
         match result {
             TunnResult::Done => return true,
-            TunnResult::Err(_) => {}
+            TunnResult::Err(err) => {
+                self.record_error_message("runtime", "tunn_result", &format!("{:?}", err));
+            }
             TunnResult::WriteToNetwork(data) => {
                 let timer_delay = self.timer_delay_for_network_write(data);
-                if socket.send_to(data, self.peer_addr).is_ok() {
-                    self.last_network_send_ms
-                        .store(now_millis(), Ordering::SeqCst);
-                    if let Some(delay) = timer_delay {
-                        self.schedule_timer_after(delay);
+                match socket.send_to(data, self.peer_addr) {
+                    Ok(_) => {
+                        self.set_event(network_event_name(data), "runtime");
+                        self.last_network_send_ms
+                            .store(now_millis(), Ordering::SeqCst);
+                        if let Some(delay) = timer_delay {
+                            self.schedule_timer_after(delay);
+                        }
+                        self.schedule_persistent_keepalive();
                     }
-                    self.schedule_persistent_keepalive();
+                    Err(err) => {
+                        self.record_io_error("runtime", "socket.send_to", &err);
+                    }
                 }
             }
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
                 if let Some(fd) = tun_fd {
-                    if write_all_fd(fd, data).is_ok() {
-                        self.tun_write_packets.fetch_add(1, Ordering::SeqCst);
-                        self.set_tun_write_last(data);
+                    match write_all_fd(fd, data) {
+                        Ok(()) => {
+                            self.tun_write_packets.fetch_add(1, Ordering::SeqCst);
+                            self.set_tun_write_last(data);
+                            self.set_event("write_to_tun", "runtime");
+                        }
+                        Err(err) => {
+                            self.record_io_error("runtime", "write_all_fd(tun)", &err);
+                        }
                     }
                 }
             }
@@ -650,10 +743,14 @@ impl TunnelRuntime {
 
     fn handle_due_timers(&self, socket: &UdpSocket, out: &mut [u8]) {
         while self.take_due_timer() {
+            self.set_event("timer_due", "runtime");
             let result = {
                 let mut tunn = match self.lock_tunn() {
                     Ok(tunn) => tunn,
-                    Err(_) => return,
+                    Err(err) => {
+                        self.record_error("runtime", "lock_tunn(update_timers)", &err);
+                        return;
+                    }
                 };
                 tunn.update_timers(out)
             };
@@ -690,6 +787,7 @@ impl TunnelRuntime {
     }
 
     fn on_worker_exit(&self, worker_code: i32) {
+        let worker_name = worker_name(worker_code);
         if worker_code == 1 {
             self.tun_worker_alive.store(false, Ordering::SeqCst);
         } else if worker_code == 2 {
@@ -701,6 +799,7 @@ impl TunnelRuntime {
             Ordering::SeqCst,
             Ordering::SeqCst
         ).ok();
+        self.set_event("worker_exit", worker_name);
         self.running.store(false, Ordering::SeqCst);
         if let Ok(stop_writers) = self.stop_writers.lock() {
             for writer in stop_writers.iter() {
@@ -749,6 +848,59 @@ impl TunnelRuntime {
                 packet_summaries.tun_write_last = summary;
             }
         }
+    }
+
+    fn set_event(&self, event: &str, worker: &str) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock() {
+            diagnostics.last_event = event.to_string();
+            diagnostics.last_worker = worker.to_string();
+        }
+    }
+
+    fn set_error(&self, message: &str, worker: &str) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock() {
+            diagnostics.last_error = message.to_string();
+            if !worker.is_empty() {
+                diagnostics.last_worker = worker.to_string();
+            }
+        }
+        if !message.is_empty() {
+            self.last_error_at_ms.store(now_millis(), Ordering::SeqCst);
+        }
+    }
+
+    fn record_error(&self, worker: &str, stage: &str, err: &Error) {
+        self.record_error_message(worker, stage, &err.reason);
+    }
+
+    fn record_io_error(&self, worker: &str, stage: &str, err: &io::Error) {
+        self.record_error_message(worker, stage, &format_io_error(err));
+    }
+
+    fn record_error_message(&self, worker: &str, stage: &str, message: &str) {
+        self.set_event(stage, worker);
+        self.set_error(&format!("{}: {}", stage, message), worker);
+    }
+
+    fn last_error(&self) -> String {
+        self.diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.last_error.clone())
+            .unwrap_or_else(|_| "diagnostics_lock_poisoned".to_string())
+    }
+
+    fn last_event(&self) -> String {
+        self.diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.last_event.clone())
+            .unwrap_or_else(|_| "diagnostics_lock_poisoned".to_string())
+    }
+
+    fn last_worker(&self) -> String {
+        self.diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.last_worker.clone())
+            .unwrap_or_else(|_| String::new())
     }
 
 }
@@ -1451,6 +1603,38 @@ fn close_if_valid(fd: RawFd) {
 
 fn is_retry(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted
+}
+
+fn format_io_error(err: &io::Error) -> String {
+    match err.raw_os_error() {
+        Some(code) => format!("errno={} {}", code, err),
+        None => err.to_string(),
+    }
+}
+
+fn worker_name(worker_code: i32) -> &'static str {
+    match worker_code {
+        1 => "tun",
+        2 => "udp",
+        _ => "runtime",
+    }
+}
+
+fn network_event_name(data: &[u8]) -> &'static str {
+    match wireguard_message_type(data) {
+        Some(WG_MESSAGE_HANDSHAKE_INITIATION) => "send_handshake_initiation",
+        Some(WG_MESSAGE_DATA) => "send_data",
+        Some(other) => {
+            if other == 2 {
+                "send_handshake_response"
+            } else if other == 3 {
+                "send_cookie_reply"
+            } else {
+                "send_network_packet"
+            }
+        }
+        None => "send_network_packet",
+    }
 }
 
 fn to_error(err: io::Error) -> Error {

@@ -6,6 +6,10 @@ export interface TunnelStats {
   tunWorkerAlive: boolean;
   udpWorkerAlive: boolean;
   workerExitCode: number;
+  lastError: string;
+  lastEvent: string;
+  lastWorker: string;
+  lastErrorAtSeconds: number;
   lastTickSeconds: number;
   txBytes: number;
   rxBytes: number;
@@ -69,6 +73,10 @@ export class NativeTunnel {
       tunWorkerAlive: NativeTunnel.booleanValue(stats.tun_worker_alive, stats.tunWorkerAlive, false),
       udpWorkerAlive: NativeTunnel.booleanValue(stats.udp_worker_alive, stats.udpWorkerAlive, false),
       workerExitCode: NativeTunnel.numberValue(stats.worker_exit_code, stats.workerExitCode, 0),
+      lastError: NativeTunnel.stringValue(stats.last_error, stats.lastError, ''),
+      lastEvent: NativeTunnel.stringValue(stats.last_event, stats.lastEvent, ''),
+      lastWorker: NativeTunnel.stringValue(stats.last_worker, stats.lastWorker, ''),
+      lastErrorAtSeconds: NativeTunnel.numberValue(stats.last_error_at_seconds, stats.lastErrorAtSeconds, -1),
       lastTickSeconds: NativeTunnel.numberValue(stats.last_tick_seconds, stats.lastTickSeconds, -1),
       txBytes: NativeTunnel.numberValue(stats.tx_bytes, stats.txBytes, 0),
       rxBytes: NativeTunnel.numberValue(stats.rx_bytes, stats.rxBytes, 0),
