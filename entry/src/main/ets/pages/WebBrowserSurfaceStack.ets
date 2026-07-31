@@ -5,13 +5,11 @@ import {
   WebViewSurfaceFullScreenEvent,
   WebViewSurfaceLoadErrorEvent,
   WebViewSurfaceNavigationEvent,
-  WebViewSurfaceOverScrollEvent,
   WebViewSurfacePageEvent,
   WebViewSurfaceProgressEvent,
   WebViewSurfaceScrollEvent,
   WebViewSurfaceTitleEvent,
-  WebViewSurfaceFaviconEvent,
-  WebViewSurfacePullGestureEvent
+  WebViewSurfaceFaviconEvent
 } from './WebViewSurface';
 
 const FALLBACK_SURFACE_CONTROLLER: webview.WebviewController =
@@ -23,7 +21,8 @@ export struct WebBrowserSurfaceStack {
   @Prop activeSurfaceKey: string = '';
   @Prop bookmarkHomeVisible: boolean = false;
   @Prop webFullScreen: boolean = false;
-  @Prop activeWebScrollBlocked: boolean = false;
+  @Prop activePullRefreshEnabled: boolean = false;
+  @Prop activePullRefreshRefreshing: boolean = false;
 
   srcFor: (surfaceKey: string) => string = () => '';
   controllerFor: (surfaceKey: string) => webview.WebviewController = () => FALLBACK_SURFACE_CONTROLLER;
@@ -38,10 +37,8 @@ export struct WebBrowserSurfaceStack {
   onFaviconReceived: (surfaceKey: string, event: WebViewSurfaceFaviconEvent) => void = () => {};
   onTrackerBlocked: (surfaceKey: string, host: string) => void = () => {};
   onScroll: (surfaceKey: string, event: WebViewSurfaceScrollEvent) => void = () => {};
-  onOverScroll: (surfaceKey: string, event: WebViewSurfaceOverScrollEvent) => void = () => {};
-  onPullGestureStart: (surfaceKey: string) => boolean = () => false;
-  onPullGestureUpdate: (surfaceKey: string, event: WebViewSurfacePullGestureEvent) => boolean = () => false;
-  onPullGestureEnd: (surfaceKey: string) => boolean = () => false;
+  onPullRefreshOffsetChange: (surfaceKey: string, offset: number) => void = () => {};
+  onPullRefreshing: (surfaceKey: string) => boolean = () => false;
   onExternalNavigation: (surfaceKey: string, event: WebViewSurfaceExternalNavigationEvent) => void = () => {};
   onFullScreenEnter: (surfaceKey: string, event: WebViewSurfaceFullScreenEvent) => void = () => {};
   onFullScreenExit: (surfaceKey: string) => void = () => {};
@@ -53,7 +50,8 @@ export struct WebBrowserSurfaceStack {
         WebViewSurface({
           src: this.srcFor(surfaceKey),
           controller: this.controllerFor(surfaceKey),
-          webScrollBlocked: surfaceKey === this.activeSurfaceKey && this.activeWebScrollBlocked,
+          pullRefreshEnabled: surfaceKey === this.activeSurfaceKey && this.activePullRefreshEnabled,
+          pullRefreshRefreshing: surfaceKey === this.activeSurfaceKey && this.activePullRefreshRefreshing,
           onControllerAttached: (): void => {
             this.onControllerAttached(surfaceKey);
           },
@@ -84,17 +82,11 @@ export struct WebBrowserSurfaceStack {
           onScroll: (event: WebViewSurfaceScrollEvent): void => {
             this.onScroll(surfaceKey, event);
           },
-          onOverScroll: (event: WebViewSurfaceOverScrollEvent): void => {
-            this.onOverScroll(surfaceKey, event);
+          onPullRefreshOffsetChange: (offset: number): void => {
+            this.onPullRefreshOffsetChange(surfaceKey, offset);
           },
-          onPullGestureStart: (): boolean => {
-            return this.onPullGestureStart(surfaceKey);
-          },
-          onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent): boolean => {
-            return this.onPullGestureUpdate(surfaceKey, event);
-          },
-          onPullGestureEnd: (): boolean => {
-            return this.onPullGestureEnd(surfaceKey);
+          onPullRefreshing: (): boolean => {
+            return this.onPullRefreshing(surfaceKey);
           },
           onExternalNavigation: (event: WebViewSurfaceExternalNavigationEvent): void => {
             this.onExternalNavigation(surfaceKey, event);

@@ -29,9 +29,6 @@ export interface PullRefreshState {
   settleTimer: number;
   browserRefreshEnabled: boolean;
   probeSerial: number;
-  gestureLastOffsetY: number;
-  gesturePullStartOffsetY: number;
-  gestureOverScrollActive: boolean;
 }
 
 export interface WebTabState {

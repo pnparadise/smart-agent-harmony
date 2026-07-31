@@ -3,6 +3,8 @@ import { PullRefreshState } from './WebBrowserTypes';
 const PULL_REFRESH_START_THRESHOLD = 24;
 const PULL_REFRESH_MAX_DISTANCE = 128;
 const TOUCH_REFRESH_DISTANCE = PULL_REFRESH_MAX_DISTANCE;
+export const WEB_NATIVE_PULL_REFRESH_DISTANCE = 160;
+export const WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE = 160;
 const PULL_REFRESH_INDICATOR_SIZE = 42;
 const PULL_REFRESH_REFRESHING_OFFSET = 32;
 const PULL_REFRESH_READY_PROGRESS = 100;
@@ -24,10 +26,7 @@ export class WebPullRefresh {
       spinTimer: -1,
       settleTimer: -1,
       browserRefreshEnabled: true,
-      probeSerial: 0,
-      gestureLastOffsetY: 0,
-      gesturePullStartOffsetY: 0,
-      gestureOverScrollActive: false
+      probeSerial: 0
     };
   }
 
@@ -53,6 +52,13 @@ export class WebPullRefresh {
     pullRefresh.ready = distance >= TOUCH_REFRESH_DISTANCE;
   }
 
+  static updateFromRefreshOffset(pullRefresh: PullRefreshState, offset: number): void {
+    const distance = Math.min(Math.max(0, offset), PULL_REFRESH_MAX_DISTANCE);
+    pullRefresh.distance = distance;
+    pullRefresh.visible = distance > 0;
+    pullRefresh.ready = offset >= WEB_NATIVE_PULL_REFRESH_DISTANCE;
+  }
+
   static reset(pullRefresh: PullRefreshState): void {
     WebPullRefresh.stopSettle(pullRefresh);
     pullRefresh.tracking = false;
@@ -61,9 +67,6 @@ export class WebPullRefresh {
     pullRefresh.ready = false;
     pullRefresh.distance = 0;
     pullRefresh.rotation = 0;
-    pullRefresh.gestureLastOffsetY = 0;
-    pullRefresh.gesturePullStartOffsetY = 0;
-    pullRefresh.gestureOverScrollActive = false;
   }
 
   static cancel(pullRefresh: PullRefreshState, onChanged: () => void): void {
@@ -88,16 +91,13 @@ export class WebPullRefresh {
     onChanged();
   }
 
-  static beginTracking(pullRefresh: PullRefreshState, pullStartOffsetY: number = 0): void {
+  static beginTracking(pullRefresh: PullRefreshState): void {
     if (!pullRefresh.refreshing) {
       WebPullRefresh.reset(pullRefresh);
     }
     WebPullRefresh.stopSettle(pullRefresh);
     pullRefresh.settling = false;
     pullRefresh.tracking = true;
-    pullRefresh.gestureLastOffsetY = pullStartOffsetY;
-    pullRefresh.gesturePullStartOffsetY = pullStartOffsetY;
-    pullRefresh.gestureOverScrollActive = true;
   }
 
   static markRefreshing(pullRefresh: PullRefreshState): void {
@@ -110,9 +110,13 @@ export class WebPullRefresh {
   }
 
   static end(pullRefresh: PullRefreshState, onChanged: () => void): void {
-    WebPullRefresh.stopSpin(pullRefresh, onChanged);
+    if (pullRefresh.spinTimer >= 0) {
+      clearInterval(pullRefresh.spinTimer);
+      pullRefresh.spinTimer = -1;
+    }
     pullRefresh.refreshing = false;
-    WebPullRefresh.cancel(pullRefresh, onChanged);
+    WebPullRefresh.reset(pullRefresh);
+    onChanged();
   }
 
   static startSpin(pullRefresh: PullRefreshState, onChanged: () => void): void {

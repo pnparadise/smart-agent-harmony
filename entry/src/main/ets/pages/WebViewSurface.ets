@@ -2,6 +2,10 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
+import {
+  WEB_NATIVE_PULL_REFRESH_DISTANCE,
+  WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE
+} from './WebPullRefresh';
 
 const DOMAIN = 0x0001;
 const TAG = 'WebViewSurface';
@@ -46,20 +50,11 @@ export interface WebViewSurfaceFullScreenEvent {
   videoHeight: number;
 }
 
-export interface WebViewSurfacePullGestureEvent {
-  offsetY: number;
-}
-
 export interface WebViewSurfaceExternalNavigationEvent {
   url: string;
 }
 
 export interface WebViewSurfaceScrollEvent {
-  xOffset: number;
-  yOffset: number;
-}
-
-export interface WebViewSurfaceOverScrollEvent {
   xOffset: number;
   yOffset: number;
 }
@@ -96,7 +91,8 @@ class WebViewSurfaceNativeMediaPlayerConfig implements NativeMediaPlayerConfig {
 @Component
 export struct WebViewSurface {
   @Prop src: string = '';
-  @Prop @Watch('onWebScrollBlockedChanged') webScrollBlocked: boolean = false;
+  @Prop pullRefreshEnabled: boolean = false;
+  @Prop @Watch('onPullRefreshRefreshingChanged') pullRefreshRefreshing: boolean = false;
   controller: webview.WebviewController = new webview.WebviewController();
   onControllerAttached: () => void = () => {};
   onPageBegin: (event: WebViewSurfacePageEvent) => void = () => {};
@@ -108,261 +104,222 @@ export struct WebViewSurface {
   onFaviconReceived: (event: WebViewSurfaceFaviconEvent) => void = () => {};
   onTrackerBlocked: (host: string) => void = () => {};
   onScroll: (event: WebViewSurfaceScrollEvent) => void = () => {};
-  onOverScroll: (event: WebViewSurfaceOverScrollEvent) => void = () => {};
-  onPullGestureStart: () => boolean = () => false;
-  onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent) => boolean = () => false;
-  onPullGestureEnd: () => boolean = () => false;
+  onPullRefreshOffsetChange: (offset: number) => void = () => {};
+  onPullRefreshing: () => boolean = () => false;
   onExternalNavigation: (event: WebViewSurfaceExternalNavigationEvent) => void = () => {};
   onFullScreenEnter: (event: WebViewSurfaceFullScreenEvent) => void = () => {};
   onFullScreenExit: () => void = () => {};
   onLoadError: (event: WebViewSurfaceLoadErrorEvent) => void = () => {};
-  private controllerAttached: boolean = false;
-  private webEventScrollingEnabled: boolean = true;
-  private webEventScrollingInitialized: boolean = false;
+  @State private nativeRefreshing: boolean = false;
+  private suppressRefreshSettleOffset: boolean = false;
 
   build() {
-    Web({ src: this.src, controller: this.controller })
+    Refresh({ refreshing: $$this.nativeRefreshing, builder: this.buildRefreshPlaceholder() }) {
+      Web({ src: this.src, controller: this.controller })
+        .width('100%')
+        .height('100%')
+        .position({ x: 0, y: 0 })
+        .javaScriptAccess(true)
+        .domStorageAccess(true)
+        .databaseAccess(true)
+        .onlineImageAccess(true)
+        .imageAccess(true)
+        .cacheMode(CacheMode.Default)
+        .mixedMode(MixedMode.Compatible)
+        .metaViewport(true)
+        .overScrollMode(OverScrollMode.NEVER)
+        .nestedScroll({
+          scrollUp: NestedScrollMode.SELF_FIRST,
+          scrollDown: NestedScrollMode.SELF_FIRST
+        })
+        .enableNativeMediaPlayer(new WebViewSurfaceNativeMediaPlayerConfig())
+        .onControllerAttached(() => {
+          hilog.info(DOMAIN, TAG, 'controller attached src=%{public}s', this.src);
+          this.onControllerAttached();
+        })
+        .onPageBegin((event) => {
+          this.onPageBegin({ url: event && event.url.length > 0 ? event.url : '' });
+        })
+        .onNavigationEntryCommitted((event) => {
+          if (!event) {
+            return;
+          }
+          this.onNavigationCommitted({
+            url: event.url,
+            isMainFrame: event.isMainFrame,
+            isSameDocument: event.isSameDocument
+          });
+        })
+        .onRefreshAccessedHistory((event) => {
+          if (!event || event.url.length === 0 || event.isMainFrame === false) {
+            return;
+          }
+          this.onNavigationCommitted({
+            url: event.url,
+            isMainFrame: true,
+            isSameDocument: false
+          });
+        })
+        .onProgressChange((event) => {
+          this.onProgressChange({ newProgress: event ? event.newProgress : 0 });
+        })
+        .onPageVisible(() => {
+          this.onPageVisible();
+        })
+        .onPageEnd((event) => {
+          this.onPageEnd({ url: event && event.url.length > 0 ? event.url : '' });
+        })
+        .onTitleReceive((event) => {
+          this.onTitleReceive({ title: event ? event.title : '' });
+        })
+        .onFaviconReceived((event) => {
+          if (event) {
+            this.onFaviconReceived({ favicon: event.favicon });
+          }
+        })
+        .onHttpErrorReceive((event) => {
+          if (!event || !event.request.isMainFrame()) {
+            return;
+          }
+          const responseCode = event.response.getResponseCode();
+          if (responseCode < 400) {
+            return;
+          }
+          this.onLoadError({
+            url: event.request.getRequestUrl(),
+            isMainFrame: true,
+            code: responseCode,
+            message: event.response.getReasonMessage(),
+            kind: 'http'
+          });
+        })
+        .onErrorReceive((event) => {
+          if (!event || !event.request.isMainFrame()) {
+            return;
+          }
+          this.onLoadError({
+            url: event.request.getRequestUrl(),
+            isMainFrame: true,
+            code: event.error.getErrorCode(),
+            message: event.error.getErrorInfo(),
+            kind: 'network'
+          });
+        })
+        .onSslErrorEventReceive((event) => {
+          if (!event) {
+            return;
+          }
+          try {
+            event.handler.handleCancel();
+          } catch (err) {
+          }
+          this.onLoadError({
+            url: this.currentUrl(),
+            isMainFrame: true,
+            code: 0,
+            message: 'SSL error',
+            kind: 'ssl'
+          });
+        })
+        .onRenderProcessNotResponding((event) => {
+          this.onLoadError({
+            url: this.currentUrl(),
+            isMainFrame: true,
+            code: 0,
+            message: event ? ('render process not responding pid=' + String(event.pid ?? 0)) :
+              'render process not responding',
+            kind: 'render-process'
+          });
+        })
+        .onLoadIntercept((event) => {
+          if (!event || !event.data || !event.data.isMainFrame()) {
+            return false;
+          }
+          const requestUrl = event.data.getRequestUrl();
+          if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
+            requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
+            return false;
+          }
+          hilog.info(DOMAIN, TAG, 'intercept external navigation by load intercept url=%{public}s', requestUrl);
+          this.onExternalNavigation({ url: requestUrl });
+          return true;
+        })
+        .onOverrideUrlLoading((event: WebResourceRequest) => {
+          if (!event) {
+            return false;
+          }
+          const requestUrl = event.getRequestUrl();
+          if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
+            requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
+            return false;
+          }
+          hilog.info(DOMAIN, TAG, 'intercept external scheme navigation url=%{public}s', requestUrl);
+          this.onExternalNavigation({ url: requestUrl });
+          return true;
+        })
+        .onIntelligentTrackingPreventionResult((event) => {
+          this.onTrackerBlocked(event ? event.host ?? '' : '');
+        })
+        .onScroll((event) => {
+          this.onScroll({
+            xOffset: event ? event.xOffset : 0,
+            yOffset: event ? event.yOffset : 0
+          });
+        })
+        .onFullScreenEnter((event) => {
+          hilog.info(DOMAIN, TAG, 'web fullscreen enter video=%{public}dx%{public}d',
+            event.videoWidth ?? 0, event.videoHeight ?? 0);
+          this.onFullScreenEnter(new WebViewSurfaceFullScreenEventImpl(
+            new WebViewSurfaceFullScreenExitHandlerImpl(event.handler),
+            event.videoWidth ?? 0,
+            event.videoHeight ?? 0
+          ));
+        })
+        .onFullScreenExit(() => {
+          hilog.info(DOMAIN, TAG, 'web fullscreen exit');
+          this.onFullScreenExit();
+        })
+    }
       .width('100%')
       .height('100%')
-      .javaScriptAccess(true)
-      .domStorageAccess(true)
-      .databaseAccess(true)
-      .onlineImageAccess(true)
-      .imageAccess(true)
-      .cacheMode(CacheMode.Default)
-      .mixedMode(MixedMode.Compatible)
-      .metaViewport(true)
-      .overScrollMode(OverScrollMode.NEVER)
-      .enableNativeMediaPlayer(new WebViewSurfaceNativeMediaPlayerConfig())
-      .onControllerAttached(() => {
-        this.controllerAttached = true;
-        this.applyWebScrollBlocked();
-        hilog.info(DOMAIN, TAG, 'controller attached src=%{public}s', this.src);
-        this.onControllerAttached();
-      })
-      .onPageBegin((event) => {
-        this.onPageBegin({ url: event && event.url.length > 0 ? event.url : '' });
-      })
-      .onNavigationEntryCommitted((event) => {
-        if (!event) {
+      .pullToRefresh(this.pullRefreshEnabled)
+      .pullDownRatio(this.pullRefreshEnabled ? 1 : 0)
+      .refreshOffset(WEB_NATIVE_PULL_REFRESH_DISTANCE)
+      .maxPullDownDistance(WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE)
+      .onOffsetChange((offset: number) => {
+        if (this.suppressRefreshSettleOffset) {
+          if (offset <= 0) {
+            this.suppressRefreshSettleOffset = false;
+            this.onPullRefreshOffsetChange(0);
+          }
           return;
         }
-        this.onNavigationCommitted({
-          url: event.url,
-          isMainFrame: event.isMainFrame,
-          isSameDocument: event.isSameDocument
-        });
+        this.onPullRefreshOffsetChange(offset);
       })
-      .onRefreshAccessedHistory((event) => {
-        if (!event || event.url.length === 0 || event.isMainFrame === false) {
-          return;
-        }
-        this.onNavigationCommitted({
-          url: event.url,
-          isMainFrame: true,
-          isSameDocument: false
-        });
-      })
-      .onProgressChange((event) => {
-        this.onProgressChange({ newProgress: event ? event.newProgress : 0 });
-      })
-      .onPageVisible(() => {
-        this.onPageVisible();
-      })
-      .onPageEnd((event) => {
-        this.onPageEnd({ url: event && event.url.length > 0 ? event.url : '' });
-      })
-      .onTitleReceive((event) => {
-        this.onTitleReceive({ title: event ? event.title : '' });
-      })
-      .onFaviconReceived((event) => {
-        if (event) {
-          this.onFaviconReceived({ favicon: event.favicon });
+      .onRefreshing(() => {
+        if (!this.onPullRefreshing()) {
+          this.suppressRefreshSettleOffset = true;
+          this.nativeRefreshing = false;
         }
       })
-      .onHttpErrorReceive((event) => {
-        if (!event || !event.request.isMainFrame()) {
-          return;
-        }
-        const responseCode = event.response.getResponseCode();
-        if (responseCode < 400) {
-          return;
-        }
-        this.onLoadError({
-          url: event.request.getRequestUrl(),
-          isMainFrame: true,
-          code: responseCode,
-          message: event.response.getReasonMessage(),
-          kind: 'http'
-        });
-      })
-      .onErrorReceive((event) => {
-        if (!event || !event.request.isMainFrame()) {
-          return;
-        }
-        this.onLoadError({
-          url: event.request.getRequestUrl(),
-          isMainFrame: true,
-          code: event.error.getErrorCode(),
-          message: event.error.getErrorInfo(),
-          kind: 'network'
-        });
-      })
-      .onSslErrorEventReceive((event) => {
-        if (!event) {
-          return;
-        }
-        try {
-          event.handler.handleCancel();
-        } catch (err) {
-        }
-        this.onLoadError({
-          url: this.currentUrl(),
-          isMainFrame: true,
-          code: 0,
-          message: 'SSL error',
-          kind: 'ssl'
-        });
-      })
-      .onRenderProcessNotResponding((event) => {
-        this.onLoadError({
-          url: this.currentUrl(),
-          isMainFrame: true,
-          code: 0,
-          message: event ? ('render process not responding pid=' + String(event.pid ?? 0)) : 'render process not responding',
-          kind: 'render-process'
-        });
-      })
-      .onLoadIntercept((event) => {
-        if (!event || !event.data || !event.data.isMainFrame()) {
-          return false;
-        }
-        const requestUrl = event.data.getRequestUrl();
-        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
-          requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
-          return false;
-        }
-        hilog.info(DOMAIN, TAG, 'intercept external navigation by load intercept url=%{public}s', requestUrl);
-        this.onExternalNavigation({ url: requestUrl });
-        return true;
-      })
-      .onOverrideUrlLoading((event: WebResourceRequest) => {
-        if (!event) {
-          return false;
-        }
-        const requestUrl = event.getRequestUrl();
-        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://') ||
-          requestUrl.startsWith('file://') || requestUrl.startsWith('resource://') || requestUrl.startsWith('about:')) {
-          return false;
-        }
-        hilog.info(DOMAIN, TAG, 'intercept external scheme navigation url=%{public}s', requestUrl);
-        this.onExternalNavigation({ url: requestUrl });
-        return true;
-      })
-      .onIntelligentTrackingPreventionResult((event) => {
-        this.onTrackerBlocked(event ? event.host ?? '' : '');
-      })
-      .onScroll((event) => {
-        if (this.webScrollBlocked) {
-          hilog.warn(DOMAIN, TAG,
-            'WG_PULL_TRACE web_scroll_while_blocked x=%{public}s y=%{public}s',
-            String(event ? event.xOffset : 0), String(event ? event.yOffset : 0));
-        }
-        this.onScroll({
-          xOffset: event ? event.xOffset : 0,
-          yOffset: event ? event.yOffset : 0
-        });
-      })
-      .onOverScroll((event) => {
-        hilog.info(DOMAIN, TAG,
-          'WG_PULL_TRACE web_over_scroll x=%{public}s y=%{public}s blocked=%{public}s',
-          String(event ? event.xOffset : 0), String(event ? event.yOffset : 0), String(this.webScrollBlocked));
-        this.onOverScroll({
-          xOffset: event ? event.xOffset : 0,
-          yOffset: event ? event.yOffset : 0
-        });
-      })
-      .onFullScreenEnter((event) => {
-        hilog.info(DOMAIN, TAG, 'web fullscreen enter video=%{public}dx%{public}d',
-          event.videoWidth ?? 0, event.videoHeight ?? 0);
-        this.onFullScreenEnter(new WebViewSurfaceFullScreenEventImpl(
-          new WebViewSurfaceFullScreenExitHandlerImpl(event.handler),
-          event.videoWidth ?? 0,
-          event.videoHeight ?? 0
-        ));
-      })
-      .onFullScreenExit(() => {
-        hilog.info(DOMAIN, TAG, 'web fullscreen exit');
-        this.onFullScreenExit();
-      })
-      .parallelGesture(
-        PanGesture({ direction: PanDirection.Vertical, distance: 1 })
-          .onActionStart(() => {
-            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_start blocked=%{public}s',
-              String(this.webScrollBlocked));
-            const blocked = this.onPullGestureStart();
-            this.setWebEventScrollingEnabled(!blocked);
-          })
-          .onActionUpdate((event: GestureEvent) => {
-            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_update offsetY=%{public}s blocked=%{public}s',
-              String(event.offsetY), String(this.webScrollBlocked));
-            const blocked = this.onPullGestureUpdate({ offsetY: event.offsetY });
-            this.setWebEventScrollingEnabled(!blocked);
-          })
-          .onActionEnd(() => {
-            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_end blocked=%{public}s',
-              String(this.webScrollBlocked));
-            const blocked = this.onPullGestureEnd();
-            this.setWebEventScrollingEnabled(!blocked);
-          })
-          .onActionCancel(() => {
-            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_cancel blocked=%{public}s',
-              String(this.webScrollBlocked));
-            const blocked = this.onPullGestureEnd();
-            this.setWebEventScrollingEnabled(!blocked);
-          })
-      )
   }
 
   aboutToAppear(): void {
-    this.applyWebScrollBlocked();
+    this.nativeRefreshing = this.pullRefreshRefreshing;
   }
 
-  aboutToDisappear(): void {
-    this.setWebEventScrollingEnabled(true);
+  @Builder
+  private buildRefreshPlaceholder() {
+    Blank()
+      .width('100%')
+      .height(0)
   }
 
-  private onWebScrollBlockedChanged(): void {
-    hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE block_prop_changed blocked=%{public}s attached=%{public}s',
-      String(this.webScrollBlocked), String(this.controllerAttached));
-    this.applyWebScrollBlocked();
-  }
-
-  private applyWebScrollBlocked(): void {
-    this.setWebEventScrollingEnabled(!this.webScrollBlocked);
-  }
-
-  private setWebEventScrollingEnabled(enabled: boolean): void {
-    if (!this.controllerAttached) {
-      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_skipped enabled=%{public}s reason=detached',
-        String(enabled));
-      return;
+  private onPullRefreshRefreshingChanged(): void {
+    if (!this.pullRefreshRefreshing && this.nativeRefreshing) {
+      this.suppressRefreshSettleOffset = true;
     }
-    if (this.webEventScrollingInitialized && this.webEventScrollingEnabled === enabled) {
-      return;
-    }
-    try {
-      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_call enabled=%{public}s type=EVENT',
-        String(enabled));
-      this.controller.setScrollable(enabled, webview.ScrollType.EVENT);
-      this.webEventScrollingEnabled = enabled;
-      this.webEventScrollingInitialized = true;
-      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_success enabled=%{public}s', String(enabled));
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.error(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_failed enabled=%{public}s error=%{public}s',
-        String(enabled), error.message ?? JSON.stringify(err));
-    }
+    this.nativeRefreshing = this.pullRefreshRefreshing;
   }
 
   loadUrl(url: string): boolean {

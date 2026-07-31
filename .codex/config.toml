@@ -1,2 +1,8 @@
 [mcp_servers.harmonyos_developer_knowledge]
 url = "https://connect-api.cloud.huawei.com/api/developerknowledge/mcp"
+
+[mcp_servers.harmonyos_developer_knowledge.tools.searchDocuments]
+approval_mode = "approve"
+
+[mcp_servers.harmonyos_developer_knowledge.tools.getDocumentsById]
+approval_mode = "approve"
