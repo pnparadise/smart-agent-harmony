@@ -1,8 +1,8 @@
 import { PullRefreshState } from './WebBrowserTypes';
 
-const TOUCH_REFRESH_DISTANCE = 112;
 const PULL_REFRESH_START_THRESHOLD = 24;
 const PULL_REFRESH_MAX_DISTANCE = 128;
+const TOUCH_REFRESH_DISTANCE = PULL_REFRESH_MAX_DISTANCE;
 const PULL_REFRESH_INDICATOR_SIZE = 42;
 const PULL_REFRESH_REFRESHING_OFFSET = 32;
 const PULL_REFRESH_READY_PROGRESS = 100;
@@ -35,10 +35,6 @@ export class WebPullRefresh {
     return pullRefresh.visible || pullRefresh.refreshing || pullRefresh.settling;
   }
 
-  static isRefreshing(pullRefresh: PullRefreshState): boolean {
-    return pullRefresh.refreshing;
-  }
-
   static activeRotation(pullRefresh: PullRefreshState): number {
     return pullRefresh.refreshing ? pullRefresh.rotation : WebPullRefresh.dragRotation(pullRefresh);
   }
@@ -50,16 +46,11 @@ export class WebPullRefresh {
     return Math.max(-PULL_REFRESH_INDICATOR_SIZE, pullRefresh.distance - PULL_REFRESH_INDICATOR_SIZE);
   }
 
-  static distance(pullRefresh: PullRefreshState): number {
-    return pullRefresh.distance;
-  }
-
   static update(pullRefresh: PullRefreshState, deltaFromStart: number): void {
     const distance = Math.min(Math.max(0, deltaFromStart - PULL_REFRESH_START_THRESHOLD), PULL_REFRESH_MAX_DISTANCE);
-    const wasVisible = pullRefresh.visible;
     pullRefresh.distance = distance;
-    pullRefresh.visible = distance > 6 || (wasVisible && pullRefresh.tracking && distance > 0);
-    pullRefresh.ready = pullRefresh.ready || distance >= TOUCH_REFRESH_DISTANCE;
+    pullRefresh.visible = distance > 0;
+    pullRefresh.ready = distance >= TOUCH_REFRESH_DISTANCE;
   }
 
   static reset(pullRefresh: PullRefreshState): void {
@@ -119,10 +110,9 @@ export class WebPullRefresh {
   }
 
   static end(pullRefresh: PullRefreshState, onChanged: () => void): void {
-    pullRefresh.refreshing = false;
     WebPullRefresh.stopSpin(pullRefresh, onChanged);
-    WebPullRefresh.reset(pullRefresh);
-    onChanged();
+    pullRefresh.refreshing = false;
+    WebPullRefresh.cancel(pullRefresh, onChanged);
   }
 
   static startSpin(pullRefresh: PullRefreshState, onChanged: () => void): void {

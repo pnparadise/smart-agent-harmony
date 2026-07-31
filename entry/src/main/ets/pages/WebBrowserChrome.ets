@@ -34,10 +34,8 @@ export struct WebBrowserChrome {
     kind: ''
   };
   @Prop pullRefreshVisible: boolean = false;
-  @Prop pullRefreshRefreshing: boolean = false;
   @Prop pullRefreshRotation: number = 0;
   @Prop pullRefreshOffset: number = 0;
-  @Prop pullRefreshDistance: number = 0;
   @Prop addBookmarkConfirmVisible: boolean = false;
   @Prop addBookmarkConfirmTitle: string = '';
   @Prop addBookmarkConfirmIcon: string = '';
@@ -310,24 +308,33 @@ export struct WebBrowserChrome {
 
   @Builder
   private buildPullRefreshIndicator() {
-    Stack() {
-      Image($r('app.media.ic_pull_refresh_gray'))
-        .width(24)
-        .height(24)
-        .rotate({ angle: this.pullRefreshRotation })
+    Stack({ alignContent: Alignment.TopStart }) {
+      Stack() {
+        Image($r('app.media.ic_pull_refresh_gray'))
+          .width(24)
+          .height(24)
+          .rotate({ angle: this.pullRefreshRotation })
+      }
+      .width(PULL_REFRESH_INDICATOR_SIZE)
+      .height(PULL_REFRESH_INDICATOR_SIZE)
+      .backgroundColor(CARD_BACKGROUND)
+      .borderRadius(PULL_REFRESH_INDICATOR_SIZE / 2)
+      .shadow({ radius: 14, color: '#24000000', offsetX: 0, offsetY: 5 })
+      .position({
+        x: '50%',
+        y: this.pullRefreshOffset
+      })
+      .translate({ x: -PULL_REFRESH_INDICATOR_SIZE / 2, y: 0, z: 0 })
+      .opacity(this.pullRefreshIndicatorOpacity())
+      .animation({ duration: 120, curve: Curve.EaseOut })
     }
-    .width(PULL_REFRESH_INDICATOR_SIZE)
-    .height(PULL_REFRESH_INDICATOR_SIZE)
-    .backgroundColor(CARD_BACKGROUND)
-    .borderRadius(PULL_REFRESH_INDICATOR_SIZE / 2)
-    .shadow({ radius: 14, color: '#24000000', offsetX: 0, offsetY: 5 })
+    .width('100%')
+    .height('100%')
     .position({
-      x: '50%',
-      y: this.pullRefreshTopPosition()
+      x: 0,
+      y: this.pullRefreshTopOffset()
     })
-    .translate({ x: -PULL_REFRESH_INDICATOR_SIZE / 2, y: 0, z: 0 })
-    .opacity(this.pullRefreshVisible ? 1 : 0)
-    .animation({ duration: 120, curve: Curve.EaseOut })
+    .clip(true)
     .zIndex(18)
   }
 
@@ -466,14 +473,9 @@ export struct WebBrowserChrome {
     return this.toolbarHeight();
   }
 
-  private pullRefreshTopPosition(): number {
-    if (!this.showToolbar || this.toolbarHidden) {
-      if (this.pullRefreshRefreshing) {
-        return this.statusBarPadding() + Math.max(0, this.pullRefreshOffset);
-      }
-      return this.statusBarPadding() + Math.max(0, this.pullRefreshDistance);
-    }
-    return this.pullRefreshTopOffset() + this.pullRefreshOffset;
+  private pullRefreshIndicatorOpacity(): number {
+    const revealedHeight = this.pullRefreshOffset + PULL_REFRESH_INDICATOR_SIZE;
+    return Math.min(1, Math.max(0, revealedHeight / PULL_REFRESH_INDICATOR_SIZE));
   }
 
   private hasBlockingOverlay(): boolean {

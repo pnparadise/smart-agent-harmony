@@ -64,7 +64,6 @@ const WEB_HOME_TAB_ID = WEB_CONTROLLER_ID_APP;
 const WEB_BOOKMARKS_HOME_URL = 'about:smart-bookmarks';
 const WEB_BOOKMARKS_HOME_TAB_ID = 'smart_agent_web_bookmarks';
 const WEB_TOOLBAR_HIDE_GESTURE_DISTANCE = 22;
-const WEB_PULL_REFRESH_OVERSCROLL_DISTANCE = 24;
 const WEB_NOTICE_DURATION_MS = 2500;
 const WEB_BROWSER_INLINE_PIP_BUTTON_SCRIPT = `
 (function () {
@@ -623,6 +622,7 @@ export struct WebBrowserPage {
   private addressSuggestionLoadVersion: number = 0;
   private handledClearTabStackRevision: number = 0;
   private handledBackgroundPipRevision: number = 0;
+  private hostEverActive: boolean = false;
   private firstContentVisibleNotified: boolean = false;
   @State private webSurfaceKeys: string[] = [];
   @State private webSurfaceKey: string = WEB_HOME_TAB_ID + '_0';
@@ -630,6 +630,7 @@ export struct WebBrowserPage {
 
   aboutToAppear(): void {
     this.configureBrowserStorage();
+    this.hostEverActive = this.hostActive;
     this.handledBackgroundPipRevision = this.backgroundPipRevisionFromHost;
     const normalized = this.normalizeUrl(this.initialUrl);
     this.instanceId = this.instanceStateId();
@@ -658,12 +659,16 @@ export struct WebBrowserPage {
 
   aboutToDisappear(): void {
     this.stopAllPullRefreshSpin();
+    // 从未在本 ability 激活过的实例（如书签 ability 里隐藏的 home 实例）持有的是启动时读入的
+    // 磁盘快照，销毁时回写会覆盖其他 ability 刚清空的堆栈状态，因此跳过持久化。
     if (this.bookmarkHomeVisible) {
       this.rememberBookmarkHomeState();
-    } else {
+    } else if (this.hostEverActive) {
       this.rememberCurrentTabState();
     }
-    this.persistWebState();
+    if (this.hostEverActive) {
+      this.persistWebState();
+    }
     this.saveWebCookies();
     this.onBackHandlerRelease();
   }
@@ -681,6 +686,7 @@ export struct WebBrowserPage {
             activeSurfaceKey: this.webSurfaceKey,
             bookmarkHomeVisible: this.bookmarkHomeVisible,
             webFullScreen: this.webFullScreen,
+            activeWebScrollBlocked: this.webScrollBlocked(this.webSurfaceKey),
             srcFor: (surfaceKey: string): string => this.surfaceInitialUrl(surfaceKey),
             controllerFor: (surfaceKey: string): webview.WebviewController => this.surfaceController(surfaceKey),
             surfaceVisibleFor: (surfaceKey: string): boolean => this.webSurfaceVisible(surfaceKey),
@@ -717,14 +723,14 @@ export struct WebBrowserPage {
             onOverScroll: (surfaceKey: string, event: WebViewSurfaceOverScrollEvent): void => {
               this.handleWebSurfaceOverScroll(surfaceKey, event);
             },
-            onPullGestureStart: (surfaceKey: string): void => {
-              this.handleWebSurfacePullGestureStart(surfaceKey);
+            onPullGestureStart: (surfaceKey: string): boolean => {
+              return this.handleWebSurfacePullGestureStart(surfaceKey);
             },
-            onPullGestureUpdate: (surfaceKey: string, event: WebViewSurfacePullGestureEvent): void => {
-              this.handleWebSurfacePullGestureUpdate(surfaceKey, event);
+            onPullGestureUpdate: (surfaceKey: string, event: WebViewSurfacePullGestureEvent): boolean => {
+              return this.handleWebSurfacePullGestureUpdate(surfaceKey, event);
             },
-            onPullGestureEnd: (surfaceKey: string): void => {
-              this.handleWebSurfacePullGestureEnd(surfaceKey);
+            onPullGestureEnd: (surfaceKey: string): boolean => {
+              return this.handleWebSurfacePullGestureEnd(surfaceKey);
             },
             onExternalNavigation: (surfaceKey: string, event: WebViewSurfaceExternalNavigationEvent): void => {
               this.handleWebSurfaceExternalNavigation(surfaceKey, event.url);
@@ -816,10 +822,8 @@ export struct WebBrowserPage {
           addressSuggestions: this.addressSuggestions,
           webError: this.webError,
           pullRefreshVisible: this.activePullRefreshVisible(),
-          pullRefreshRefreshing: this.activePullRefreshRefreshing(),
           pullRefreshRotation: this.activePullRefreshRotation(),
           pullRefreshOffset: this.activePullRefreshIndicatorOffset(),
-          pullRefreshDistance: this.activePullRefreshDistance(),
           addBookmarkConfirmVisible: this.addBookmarkConfirmVisible,
           addBookmarkConfirmTitle: this.addBookmarkConfirmTitle,
           addBookmarkConfirmIcon: this.addBookmarkConfirmIcon,
@@ -1194,76 +1198,120 @@ export struct WebBrowserPage {
 
   private handleWebSurfaceOverScroll(surfaceKey: string, event: WebViewSurfaceOverScrollEvent): void {
     const pullRefresh = this.pullRefreshState(surfaceKey);
+    hilog.info(DOMAIN, TAG,
+      'WG_PULL_TRACE page_over_scroll surface=%{public}s y=%{public}s scrollY=%{public}s active=%{public}s ' +
+      'loading=%{public}s refreshing=%{public}s enabled=%{public}s',
+      surfaceKey, String(event.yOffset), String(this.currentScrollY(surfaceKey)),
+      String(this.shouldHandleWebSurface(surfaceKey)), String(this.loading), String(pullRefresh.refreshing),
+      String(pullRefresh.browserRefreshEnabled));
     if (!this.shouldHandleWebSurface(surfaceKey) || this.webFullScreen || this.loading || pullRefresh.refreshing ||
       !pullRefresh.browserRefreshEnabled) {
       pullRefresh.gestureOverScrollActive = false;
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE page_over_scroll_rejected surface=%{public}s', surfaceKey);
       return;
     }
-    if (Math.abs(event.yOffset) >= WEB_PULL_REFRESH_OVERSCROLL_DISTANCE && this.currentScrollY(surfaceKey) <= 1) {
-      pullRefresh.gestureOverScrollActive = true;
+    if (Math.abs(event.yOffset) > 0 && this.currentScrollY(surfaceKey) <= 1 &&
+      pullRefresh.gestureOverScrollActive) {
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE page_over_scroll_observed surface=%{public}s', surfaceKey);
     }
   }
 
-  private handleWebSurfacePullGestureStart(surfaceKey: string): void {
+  private handleWebSurfacePullGestureStart(surfaceKey: string): boolean {
     const pullRefresh = this.pullRefreshState(surfaceKey);
+    hilog.info(DOMAIN, TAG,
+      'WG_PULL_TRACE page_gesture_start surface=%{public}s scrollY=%{public}s refreshing=%{public}s ' +
+      'enabled=%{public}s loading=%{public}s',
+      surfaceKey, String(this.currentScrollY(surfaceKey)), String(pullRefresh.refreshing),
+      String(pullRefresh.browserRefreshEnabled), String(this.loading));
     pullRefresh.gestureLastOffsetY = 0;
     pullRefresh.gestureOverScrollActive = false;
     if (pullRefresh.refreshing) {
-      return;
+      return this.webScrollBlocked(surfaceKey);
     }
     if (!this.shouldHandleWebSurface(surfaceKey) || this.webFullScreen || this.loading) {
       this.resetPullRefresh(surfaceKey);
-      return;
+      return false;
     }
     if (!pullRefresh.browserRefreshEnabled || this.currentScrollY(surfaceKey) > 1) {
       this.resetPullRefresh(surfaceKey);
-      return;
+      return false;
     }
+    pullRefresh.gestureOverScrollActive = true;
+    this.bumpPullRefreshRevision();
+    return true;
   }
 
-  private handleWebSurfacePullGestureUpdate(surfaceKey: string, event: WebViewSurfacePullGestureEvent): void {
+  private handleWebSurfacePullGestureUpdate(surfaceKey: string, event: WebViewSurfacePullGestureEvent): boolean {
     const pullRefresh = this.pullRefreshState(surfaceKey);
     const allowDirectPullRefresh = this.canStartPullRefreshWithoutOverScroll(surfaceKey);
+    hilog.info(DOMAIN, TAG,
+      'WG_PULL_TRACE page_gesture_update_before surface=%{public}s offsetY=%{public}s scrollY=%{public}s ' +
+      'overScroll=%{public}s tracking=%{public}s visible=%{public}s ready=%{public}s blocked=%{public}s',
+      surfaceKey, String(event.offsetY), String(this.currentScrollY(surfaceKey)),
+      String(pullRefresh.gestureOverScrollActive), String(pullRefresh.tracking), String(pullRefresh.visible),
+      String(pullRefresh.ready), String(this.webScrollBlocked(surfaceKey)));
     this.updateToolbarVisibilityForWebGesture(surfaceKey, event.offsetY);
     if (pullRefresh.refreshing) {
-      return;
+      return this.webScrollBlocked(surfaceKey);
     }
     if (!this.shouldHandleWebSurface(surfaceKey) || this.webFullScreen || this.loading) {
       this.resetPullRefresh(surfaceKey);
-      return;
+      return false;
+    }
+    if (event.offsetY <= 0) {
+      this.resetPullRefresh(surfaceKey);
+      return false;
     }
     if (!pullRefresh.tracking) {
-      if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled ||
+      if (!pullRefresh.browserRefreshEnabled ||
         (!pullRefresh.gestureOverScrollActive && !allowDirectPullRefresh) ||
         this.currentScrollY(surfaceKey) > 1) {
-        return;
+        this.resetPullRefresh(surfaceKey);
+        return false;
       }
       WebPullRefresh.beginTracking(pullRefresh);
     }
-    if (event.offsetY <= 0 || !pullRefresh.browserRefreshEnabled) {
+    if (!pullRefresh.browserRefreshEnabled) {
       this.resetPullRefresh(surfaceKey);
-      return;
+      return false;
     }
     this.updatePullRefresh(surfaceKey, event.offsetY);
+    hilog.info(DOMAIN, TAG,
+      'WG_PULL_TRACE page_gesture_update_after surface=%{public}s offsetY=%{public}s distance=%{public}s ' +
+      'tracking=%{public}s visible=%{public}s ready=%{public}s blocked=%{public}s',
+      surfaceKey, String(event.offsetY), String(pullRefresh.distance), String(pullRefresh.tracking),
+      String(pullRefresh.visible), String(pullRefresh.ready), String(this.webScrollBlocked(surfaceKey)));
+    return this.webScrollBlocked(surfaceKey);
   }
 
-  private handleWebSurfacePullGestureEnd(surfaceKey: string): void {
+  private handleWebSurfacePullGestureEnd(surfaceKey: string): boolean {
     if (!this.shouldHandleWebSurface(surfaceKey)) {
-      return;
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE page_gesture_end_ignored surface=%{public}s', surfaceKey);
+      this.resetPullRefresh(surfaceKey);
+      return false;
     }
     const pullRefresh = this.pullRefreshState(surfaceKey);
+    hilog.info(DOMAIN, TAG,
+      'WG_PULL_TRACE page_gesture_end surface=%{public}s scrollY=%{public}s tracking=%{public}s ' +
+      'visible=%{public}s ready=%{public}s overScroll=%{public}s blocked=%{public}s',
+      surfaceKey, String(this.currentScrollY(surfaceKey)), String(pullRefresh.tracking),
+      String(pullRefresh.visible), String(pullRefresh.ready), String(pullRefresh.gestureOverScrollActive),
+      String(this.webScrollBlocked(surfaceKey)));
     pullRefresh.gestureLastOffsetY = 0;
     if (pullRefresh.refreshing) {
-      return;
+      return this.webScrollBlocked(surfaceKey);
     }
     if (pullRefresh.tracking && pullRefresh.ready && pullRefresh.browserRefreshEnabled &&
       (pullRefresh.gestureOverScrollActive || this.canStartPullRefreshWithoutOverScroll(surfaceKey)) &&
       this.currentScrollY(surfaceKey) <= 1) {
+      pullRefresh.gestureOverScrollActive = false;
+      this.bumpPullRefreshRevision();
       this.refreshAfterWebGestureCheck(surfaceKey);
-      return;
+      return this.webScrollBlocked(surfaceKey);
     }
     this.cancelPullRefresh(surfaceKey);
     pullRefresh.gestureOverScrollActive = false;
+    return this.webScrollBlocked(surfaceKey);
   }
 
   private handleBookmarkPullRefreshStart(): void {
@@ -1858,6 +1906,7 @@ export struct WebBrowserPage {
 
   private onHostActiveChanged(): void {
     if (this.hostActive) {
+      this.hostEverActive = true;
       this.handledBackgroundPipRevision = this.backgroundPipRevisionFromHost;
     }
   }
@@ -3445,8 +3494,13 @@ export struct WebBrowserPage {
     return WebPullRefresh.shouldShowIndicator(this.activePullRefreshState());
   }
 
-  private activePullRefreshRefreshing(): boolean {
-    return WebPullRefresh.isRefreshing(this.activePullRefreshState());
+  private webScrollBlocked(surfaceKey: string): boolean {
+    if (this.pullRefreshRevision < 0) {
+      return false;
+    }
+    const pullRefresh = this.pullRefreshState(surfaceKey);
+    return this.shouldHandleWebSurface(surfaceKey) && !this.webFullScreen &&
+      pullRefresh.gestureOverScrollActive;
   }
 
   private activePullRefreshRotation(): number {
@@ -3455,10 +3509,6 @@ export struct WebBrowserPage {
 
   private activePullRefreshIndicatorOffset(): number {
     return WebPullRefresh.indicatorOffset(this.activePullRefreshState());
-  }
-
-  private activePullRefreshDistance(): number {
-    return WebPullRefresh.distance(this.activePullRefreshState());
   }
 
   private updatePullRefresh(surfaceKey: string, deltaFromStart: number): void {
@@ -3472,7 +3522,9 @@ export struct WebBrowserPage {
   }
 
   private cancelPullRefresh(surfaceKey: string = ''): void {
-    WebPullRefresh.cancel(this.pullRefreshState(surfaceKey), (): void => {
+    const pullRefresh = this.pullRefreshState(surfaceKey);
+    pullRefresh.gestureOverScrollActive = false;
+    WebPullRefresh.cancel(pullRefresh, (): void => {
       this.bumpPullRefreshRevision();
     });
   }

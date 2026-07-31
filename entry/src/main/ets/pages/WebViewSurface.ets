@@ -96,6 +96,7 @@ class WebViewSurfaceNativeMediaPlayerConfig implements NativeMediaPlayerConfig {
 @Component
 export struct WebViewSurface {
   @Prop src: string = '';
+  @Prop @Watch('onWebScrollBlockedChanged') webScrollBlocked: boolean = false;
   controller: webview.WebviewController = new webview.WebviewController();
   onControllerAttached: () => void = () => {};
   onPageBegin: (event: WebViewSurfacePageEvent) => void = () => {};
@@ -108,14 +109,16 @@ export struct WebViewSurface {
   onTrackerBlocked: (host: string) => void = () => {};
   onScroll: (event: WebViewSurfaceScrollEvent) => void = () => {};
   onOverScroll: (event: WebViewSurfaceOverScrollEvent) => void = () => {};
-  onPullGestureStart: () => void = () => {};
-  onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent) => void = () => {};
-  onPullGestureEnd: () => void = () => {};
+  onPullGestureStart: () => boolean = () => false;
+  onPullGestureUpdate: (event: WebViewSurfacePullGestureEvent) => boolean = () => false;
+  onPullGestureEnd: () => boolean = () => false;
   onExternalNavigation: (event: WebViewSurfaceExternalNavigationEvent) => void = () => {};
   onFullScreenEnter: (event: WebViewSurfaceFullScreenEvent) => void = () => {};
   onFullScreenExit: () => void = () => {};
   onLoadError: (event: WebViewSurfaceLoadErrorEvent) => void = () => {};
   private controllerAttached: boolean = false;
+  private webEventScrollingEnabled: boolean = true;
+  private webEventScrollingInitialized: boolean = false;
 
   build() {
     Web({ src: this.src, controller: this.controller })
@@ -129,10 +132,11 @@ export struct WebViewSurface {
       .cacheMode(CacheMode.Default)
       .mixedMode(MixedMode.Compatible)
       .metaViewport(true)
-      .overScrollMode(OverScrollMode.ALWAYS)
+      .overScrollMode(OverScrollMode.NEVER)
       .enableNativeMediaPlayer(new WebViewSurfaceNativeMediaPlayerConfig())
       .onControllerAttached(() => {
         this.controllerAttached = true;
+        this.applyWebScrollBlocked();
         hilog.info(DOMAIN, TAG, 'controller attached src=%{public}s', this.src);
         this.onControllerAttached();
       })
@@ -259,12 +263,20 @@ export struct WebViewSurface {
         this.onTrackerBlocked(event ? event.host ?? '' : '');
       })
       .onScroll((event) => {
+        if (this.webScrollBlocked) {
+          hilog.warn(DOMAIN, TAG,
+            'WG_PULL_TRACE web_scroll_while_blocked x=%{public}s y=%{public}s',
+            String(event ? event.xOffset : 0), String(event ? event.yOffset : 0));
+        }
         this.onScroll({
           xOffset: event ? event.xOffset : 0,
           yOffset: event ? event.yOffset : 0
         });
       })
       .onOverScroll((event) => {
+        hilog.info(DOMAIN, TAG,
+          'WG_PULL_TRACE web_over_scroll x=%{public}s y=%{public}s blocked=%{public}s',
+          String(event ? event.xOffset : 0), String(event ? event.yOffset : 0), String(this.webScrollBlocked));
         this.onOverScroll({
           xOffset: event ? event.xOffset : 0,
           yOffset: event ? event.yOffset : 0
@@ -286,18 +298,71 @@ export struct WebViewSurface {
       .parallelGesture(
         PanGesture({ direction: PanDirection.Vertical, distance: 1 })
           .onActionStart(() => {
-            this.onPullGestureStart();
+            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_start blocked=%{public}s',
+              String(this.webScrollBlocked));
+            const blocked = this.onPullGestureStart();
+            this.setWebEventScrollingEnabled(!blocked);
           })
           .onActionUpdate((event: GestureEvent) => {
-            this.onPullGestureUpdate({ offsetY: event.offsetY });
+            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_update offsetY=%{public}s blocked=%{public}s',
+              String(event.offsetY), String(this.webScrollBlocked));
+            const blocked = this.onPullGestureUpdate({ offsetY: event.offsetY });
+            this.setWebEventScrollingEnabled(!blocked);
           })
           .onActionEnd(() => {
-            this.onPullGestureEnd();
+            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_end blocked=%{public}s',
+              String(this.webScrollBlocked));
+            const blocked = this.onPullGestureEnd();
+            this.setWebEventScrollingEnabled(!blocked);
           })
           .onActionCancel(() => {
-            this.onPullGestureEnd();
+            hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE gesture_cancel blocked=%{public}s',
+              String(this.webScrollBlocked));
+            const blocked = this.onPullGestureEnd();
+            this.setWebEventScrollingEnabled(!blocked);
           })
       )
+  }
+
+  aboutToAppear(): void {
+    this.applyWebScrollBlocked();
+  }
+
+  aboutToDisappear(): void {
+    this.setWebEventScrollingEnabled(true);
+  }
+
+  private onWebScrollBlockedChanged(): void {
+    hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE block_prop_changed blocked=%{public}s attached=%{public}s',
+      String(this.webScrollBlocked), String(this.controllerAttached));
+    this.applyWebScrollBlocked();
+  }
+
+  private applyWebScrollBlocked(): void {
+    this.setWebEventScrollingEnabled(!this.webScrollBlocked);
+  }
+
+  private setWebEventScrollingEnabled(enabled: boolean): void {
+    if (!this.controllerAttached) {
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_skipped enabled=%{public}s reason=detached',
+        String(enabled));
+      return;
+    }
+    if (this.webEventScrollingInitialized && this.webEventScrollingEnabled === enabled) {
+      return;
+    }
+    try {
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_call enabled=%{public}s type=EVENT',
+        String(enabled));
+      this.controller.setScrollable(enabled, webview.ScrollType.EVENT);
+      this.webEventScrollingEnabled = enabled;
+      this.webEventScrollingInitialized = true;
+      hilog.info(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_success enabled=%{public}s', String(enabled));
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.error(DOMAIN, TAG, 'WG_PULL_TRACE set_scrollable_failed enabled=%{public}s error=%{public}s',
+        String(enabled), error.message ?? JSON.stringify(err));
+    }
   }
 
   loadUrl(url: string): boolean {
