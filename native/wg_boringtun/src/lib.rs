@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -9,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use napi_derive_ohos::napi;
@@ -27,7 +29,8 @@ const REKEY_TIMEOUT_MS: u64 = 5_000;
 const KEEPALIVE_TIMEOUT_MS: u64 = 10_000;
 const DATA_SILENCE_REKEY_MS: u64 = 15_000;
 const MIN_TIMER_DELAY_MS: u64 = 500;
-const QOS_BACKGROUND: libc::c_int = 0;
+const PACKET_DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 256;
+const QOS_DEFAULT: libc::c_int = 2;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -357,9 +360,18 @@ impl TunnelRuntime {
         let tun_worker = match thread::Builder::new()
             .name("wg-tun-reader".to_string())
             .spawn(move || {
-                let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
+                let _qos = ThreadQosGuard::new(QOS_DEFAULT);
                 tun_read_runtime.set_event("thread_started", "tun");
-                tun_read_runtime.tun_reader_loop(tun_for_read, tun_stop_read, socket_for_write);
+                let worker_result = catch_unwind(AssertUnwindSafe(|| {
+                    tun_read_runtime.tun_reader_loop(tun_for_read, tun_stop_read, socket_for_write);
+                }));
+                if let Err(payload) = worker_result {
+                    tun_read_runtime.record_error_message(
+                        "tun",
+                        "worker_panic",
+                        &panic_payload_message(payload.as_ref()),
+                    );
+                }
                 tun_read_runtime.on_worker_exit(1);
             })
             .map_err(to_error) {
@@ -378,9 +390,18 @@ impl TunnelRuntime {
         let udp_worker = match thread::Builder::new()
             .name("wg-udp-reader".to_string())
             .spawn(move || {
-                let _qos = ThreadQosGuard::new(QOS_BACKGROUND);
+                let _qos = ThreadQosGuard::new(QOS_DEFAULT);
                 udp_runtime.set_event("thread_started", "udp");
-                udp_runtime.udp_reader_loop(socket_for_read, udp_stop_read, tun_for_write);
+                let worker_result = catch_unwind(AssertUnwindSafe(|| {
+                    udp_runtime.udp_reader_loop(socket_for_read, udp_stop_read, tun_for_write);
+                }));
+                if let Err(payload) = worker_result {
+                    udp_runtime.record_error_message(
+                        "udp",
+                        "worker_panic",
+                        &panic_payload_message(payload.as_ref()),
+                    );
+                }
                 udp_runtime.on_worker_exit(2);
             })
             .map_err(to_error) {
@@ -430,6 +451,11 @@ impl TunnelRuntime {
         stop_writers.push(udp_stop_write);
         workers.push(tun_worker);
         workers.push(udp_worker);
+        if !self.running.load(Ordering::SeqCst) {
+            for writer in stop_writers.iter() {
+                let _ = write_stop_signal(writer.as_raw_fd());
+            }
+        }
         drop(stop_writers);
         drop(workers);
         self.schedule_persistent_keepalive();
@@ -485,8 +511,10 @@ impl TunnelRuntime {
                     continue;
                 }
                 Ok(size) => {
-                    self.tun_read_packets.fetch_add(1, Ordering::SeqCst);
-                    self.set_tun_read_last(&packet[..size]);
+                    let packet_count = self.tun_read_packets.fetch_add(1, Ordering::SeqCst) + 1;
+                    if should_sample_packet(packet_count) {
+                        self.set_tun_read_last(&packet[..size]);
+                    }
                     if should_drop_quiet_tun_packet(&packet[..size]) {
                         self.tun_dropped_packets.fetch_add(1, Ordering::SeqCst);
                         continue;
@@ -502,7 +530,7 @@ impl TunnelRuntime {
                         };
                         tunn.encapsulate(&packet[..size], &mut out)
                     };
-                    self.handle_tunn_result(result, &socket, None);
+                    self.handle_tunn_result(result, &socket, None, None);
                 }
                 Err(err) if is_retry(&err) => continue,
                 Err(err) => {
@@ -565,7 +593,12 @@ impl TunnelRuntime {
                         };
                         tunn.decapsulate(Some(src.ip()), &datagram[..size], &mut out)
                     };
-                    self.handle_tunn_result(result, &socket, Some(tun_fd.as_raw_fd()));
+                    self.handle_tunn_result(
+                        result,
+                        &socket,
+                        Some(tun_fd.as_raw_fd()),
+                        Some(stop_fd.as_raw_fd()),
+                    );
 
                     loop {
                         let result = {
@@ -579,7 +612,12 @@ impl TunnelRuntime {
                             tunn.decapsulate(Some(src.ip()), &[], &mut out)
                         };
                         let flush_again = should_flush_again(&result);
-                        let _ = self.handle_tunn_result(result, &socket, Some(tun_fd.as_raw_fd()));
+                        let _ = self.handle_tunn_result(
+                            result,
+                            &socket,
+                            Some(tun_fd.as_raw_fd()),
+                            Some(stop_fd.as_raw_fd()),
+                        );
                         if !flush_again {
                             break;
                         }
@@ -611,7 +649,7 @@ impl TunnelRuntime {
             };
             tunn.format_handshake_initiation(&mut out, false)
         };
-        let _ = self.handle_tunn_result(result, &self.socket, None);
+        let _ = self.handle_tunn_result(result, &self.socket, None, None);
     }
 
     fn force_handshake(&self) -> Result<()> {
@@ -621,7 +659,7 @@ impl TunnelRuntime {
             tunn.format_handshake_initiation(&mut out, true)
         };
         self.set_event("force_handshake_requested", "runtime");
-        let _ = self.handle_tunn_result(result, &self.socket, None);
+        let _ = self.handle_tunn_result(result, &self.socket, None, None);
         Ok(())
     }
 
@@ -630,17 +668,25 @@ impl TunnelRuntime {
         result: TunnResult<'_>,
         socket: &UdpSocket,
         tun_fd: Option<RawFd>,
+        stop_fd: Option<RawFd>,
     ) -> bool {
         match result {
             TunnResult::Done => return true,
             TunnResult::Err(err) => {
                 self.record_error_message("runtime", "tunn_result", &format!("{:?}", err));
+                if matches!(err, WireGuardError::ConnectionExpired) {
+                    self.running.store(false, Ordering::SeqCst);
+                    self.signal_workers();
+                }
             }
             TunnResult::WriteToNetwork(data) => {
                 let timer_delay = self.timer_delay_for_network_write(data);
                 match socket.send_to(data, self.peer_addr) {
                     Ok(_) => {
-                        self.set_event(network_event_name(data), "runtime");
+                        let event_name = network_event_name(data);
+                        if event_name != "send_data" {
+                            self.set_event(event_name, "runtime");
+                        }
                         self.last_network_send_ms
                             .store(now_millis(), Ordering::SeqCst);
                         if let Some(delay) = timer_delay {
@@ -654,15 +700,20 @@ impl TunnelRuntime {
                 }
             }
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                if let Some(fd) = tun_fd {
-                    match write_all_fd(fd, data) {
+                if let (Some(fd), Some(stop_fd)) = (tun_fd, stop_fd) {
+                    match self.write_all_fd_stoppable(fd, stop_fd, data) {
                         Ok(()) => {
-                            self.tun_write_packets.fetch_add(1, Ordering::SeqCst);
-                            self.set_tun_write_last(data);
-                            self.set_event("write_to_tun", "runtime");
+                            let packet_count =
+                                self.tun_write_packets.fetch_add(1, Ordering::SeqCst) + 1;
+                            if should_sample_packet(packet_count) {
+                                self.set_tun_write_last(data);
+                                self.set_event("write_to_tun", "runtime");
+                            }
                         }
                         Err(err) => {
-                            self.record_io_error("runtime", "write_all_fd(tun)", &err);
+                            if self.running.load(Ordering::SeqCst) {
+                                self.record_io_error("runtime", "write_all_fd_stoppable(tun)", &err);
+                            }
                         }
                     }
                 }
@@ -754,7 +805,7 @@ impl TunnelRuntime {
                 };
                 tunn.update_timers(out)
             };
-            if self.handle_tunn_result(result, socket, None) {
+            if self.handle_tunn_result(result, socket, None, None) {
                 self.schedule_persistent_keepalive();
             }
         }
@@ -774,6 +825,49 @@ impl TunnelRuntime {
         if let Some(fd) = fd {
             let _ = write_stop_signal(fd);
         }
+    }
+
+    fn signal_workers(&self) {
+        if let Ok(stop_writers) = self.stop_writers.lock() {
+            for writer in stop_writers.iter() {
+                let _ = write_stop_signal(writer.as_raw_fd());
+            }
+        }
+    }
+
+    fn write_all_fd_stoppable(&self, fd: RawFd, stop_fd: RawFd, mut data: &[u8]) -> io::Result<()> {
+        while !data.is_empty() {
+            if !self.running.load(Ordering::SeqCst) {
+                return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+
+            let result = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
+            if result > 0 {
+                data = &data[result as usize..];
+                continue;
+            }
+            if result == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "TUN write returned zero"));
+            }
+
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if err.kind() != io::ErrorKind::WouldBlock {
+                return Err(err);
+            }
+
+            match poll_writable_or_stop(fd, stop_fd, -1)? {
+                PollOutcome::Ready => {}
+                PollOutcome::Stopped if self.running.load(Ordering::SeqCst) => continue,
+                PollOutcome::Stopped => {
+                    return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                PollOutcome::TimedOut => continue,
+            }
+        }
+        Ok(())
     }
 
     fn is_running(&self) -> bool {
@@ -801,11 +895,7 @@ impl TunnelRuntime {
         ).ok();
         self.set_event("worker_exit", worker_name);
         self.running.store(false, Ordering::SeqCst);
-        if let Ok(stop_writers) = self.stop_writers.lock() {
-            for writer in stop_writers.iter() {
-                let _ = write_stop_signal(writer.as_raw_fd());
-            }
-        }
+        self.signal_workers();
         let _ = self.set_timer_wake_fd(None);
     }
 
@@ -1414,20 +1504,44 @@ fn poll_readable_or_stop(fd: RawFd, stop_fd: RawFd, timeout_ms: i32) -> io::Resu
     Ok(PollOutcome::Stopped)
 }
 
-fn write_all_fd(fd: RawFd, mut data: &[u8]) -> io::Result<()> {
-    while !data.is_empty() {
-        let result = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        if result < 0 {
-            let err = io::Error::last_os_error();
-            if is_retry(&err) {
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            return Err(err);
-        }
-        data = &data[result as usize..];
+fn poll_writable_or_stop(fd: RawFd, stop_fd: RawFd, timeout_ms: i32) -> io::Result<PollOutcome> {
+    let mut poll_fds = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: stop_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let result = unsafe {
+        libc::poll(
+            poll_fds.as_mut_ptr(),
+            poll_fds.len() as libc::nfds_t,
+            timeout_ms,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
     }
-    Ok(())
+    if result == 0 {
+        return Ok(PollOutcome::TimedOut);
+    }
+    if poll_fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+    {
+        let _ = drain_fd(stop_fd);
+        return Ok(PollOutcome::Stopped);
+    }
+    if poll_fds[0].revents & libc::POLLOUT != 0 {
+        return Ok(PollOutcome::Ready);
+    }
+    if poll_fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(PollOutcome::Stopped)
 }
 
 fn drain_fd(fd: RawFd) -> io::Result<()> {
@@ -1618,6 +1732,20 @@ fn worker_name(worker_code: i32) -> &'static str {
         2 => "udp",
         _ => "runtime",
     }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic payload".to_string()
+}
+
+fn should_sample_packet(packet_count: u64) -> bool {
+    packet_count == 1 || packet_count % PACKET_DIAGNOSTIC_SAMPLE_INTERVAL == 0
 }
 
 fn network_event_name(data: &[u8]) -> &'static str {

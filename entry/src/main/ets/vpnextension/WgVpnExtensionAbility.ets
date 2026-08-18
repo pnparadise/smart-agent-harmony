@@ -11,9 +11,9 @@ import {
   buildSmartAgentSwitchLogEntry,
   buildVpnRestartLogEntry,
   DEFAULT_DOH_PROVIDER,
+  hasActiveTunnelSelection,
   loadAppSplitEnabled,
   loadActiveTunnelInfo,
-  loadConfig,
   loadDohSettings,
   loadSelectedSplitApps,
   loadSmartAgentEnabled,
@@ -369,26 +369,20 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     return encodedParts.join('|');
   }
 
-  private async resolveConfigText(): Promise<string> {
-    hilog.info(DOMAIN, TAG, 'using config from preferences');
-    return await loadConfig(this.context as common.VpnExtensionContext, true);
-  }
-
   private async resolveActiveTunnelInfo(): Promise<ActiveTunnelInfo> {
     const activeInfo = await loadActiveTunnelInfo(this.context as common.VpnExtensionContext, true);
-    if (activeInfo.configText.length > 0) {
+    if (hasActiveTunnelSelection(activeInfo)) {
       hilog.info(DOMAIN, TAG, 'using active tunnel config id=%{public}s name=%{public}s', activeInfo.id, activeInfo.name);
       return activeInfo;
     }
 
-    const fallbackConfig = await this.resolveConfigText();
-    const fallbackInfo: ActiveTunnelInfo = {
+    const emptyInfo: ActiveTunnelInfo = {
       id: '',
       name: '',
-      configText: fallbackConfig
+      configText: ''
     };
-    hilog.warn(DOMAIN, TAG, 'active tunnel config empty, fallback configBytes=%{public}d', fallbackConfig.length);
-    return fallbackInfo;
+    hilog.info(DOMAIN, TAG, 'no active tunnel selected, keep direct connection');
+    return emptyInfo;
   }
 
   private async resolveSmartAgentDecision(): Promise<SmartAgentDecision> {

@@ -9,6 +9,7 @@ import {
 
 const DOMAIN = 0x0001;
 const TAG = 'WebViewSurface';
+const NATIVE_REFRESH_SETTLE_FALLBACK_MS = 240;
 
 export interface WebViewSurfacePageEvent {
   url: string;
@@ -111,7 +112,9 @@ export struct WebViewSurface {
   onFullScreenExit: () => void = () => {};
   onLoadError: (event: WebViewSurfaceLoadErrorEvent) => void = () => {};
   @State private nativeRefreshing: boolean = false;
+  @State private nativeRefreshSettling: boolean = false;
   private suppressRefreshSettleOffset: boolean = false;
+  private nativeRefreshSettleTimer: number = -1;
 
   build() {
     Refresh({ refreshing: $$this.nativeRefreshing, builder: this.buildRefreshPlaceholder() }) {
@@ -282,14 +285,14 @@ export struct WebViewSurface {
     }
       .width('100%')
       .height('100%')
-      .pullToRefresh(this.pullRefreshEnabled)
-      .pullDownRatio(this.pullRefreshEnabled ? 1 : 0)
+      .pullToRefresh(this.nativePullRefreshEnabled())
+      .pullDownRatio(this.nativePullRefreshEnabled() ? 1 : 0)
       .refreshOffset(WEB_NATIVE_PULL_REFRESH_DISTANCE)
       .maxPullDownDistance(WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE)
       .onOffsetChange((offset: number) => {
         if (this.suppressRefreshSettleOffset) {
           if (offset <= 0) {
-            this.suppressRefreshSettleOffset = false;
+            this.completeNativeRefreshSettle();
             this.onPullRefreshOffsetChange(0);
           }
           return;
@@ -297,15 +300,24 @@ export struct WebViewSurface {
         this.onPullRefreshOffsetChange(offset);
       })
       .onRefreshing(() => {
-        if (!this.onPullRefreshing()) {
-          this.suppressRefreshSettleOffset = true;
-          this.nativeRefreshing = false;
-        }
+        // The custom browser indicator owns the long-running refresh state. Keep
+        // the native Refresh component only for recognizing the pull gesture so
+        // it does not retain the WebView's vertical gesture stream.
+        this.beginNativeRefreshSettle();
+        this.onPullRefreshing();
+        this.nativeRefreshing = false;
       })
   }
 
   aboutToAppear(): void {
-    this.nativeRefreshing = this.pullRefreshRefreshing;
+    this.stopNativeRefreshSettleTimer();
+    this.suppressRefreshSettleOffset = false;
+    this.nativeRefreshSettling = false;
+    this.nativeRefreshing = false;
+  }
+
+  aboutToDisappear(): void {
+    this.stopNativeRefreshSettleTimer();
   }
 
   @Builder
@@ -316,10 +328,36 @@ export struct WebViewSurface {
   }
 
   private onPullRefreshRefreshingChanged(): void {
-    if (!this.pullRefreshRefreshing && this.nativeRefreshing) {
-      this.suppressRefreshSettleOffset = true;
+    if (!this.pullRefreshRefreshing) {
+      this.beginNativeRefreshSettle();
     }
-    this.nativeRefreshing = this.pullRefreshRefreshing;
+  }
+
+  private nativePullRefreshEnabled(): boolean {
+    return this.pullRefreshEnabled && !this.pullRefreshRefreshing && !this.nativeRefreshSettling;
+  }
+
+  private beginNativeRefreshSettle(): void {
+    this.suppressRefreshSettleOffset = true;
+    this.nativeRefreshSettling = true;
+    this.stopNativeRefreshSettleTimer();
+    this.nativeRefreshSettleTimer = setTimeout(() => {
+      this.nativeRefreshSettleTimer = -1;
+      this.completeNativeRefreshSettle();
+    }, NATIVE_REFRESH_SETTLE_FALLBACK_MS);
+  }
+
+  private completeNativeRefreshSettle(): void {
+    this.stopNativeRefreshSettleTimer();
+    this.suppressRefreshSettleOffset = false;
+    this.nativeRefreshSettling = false;
+  }
+
+  private stopNativeRefreshSettleTimer(): void {
+    if (this.nativeRefreshSettleTimer >= 0) {
+      clearTimeout(this.nativeRefreshSettleTimer);
+      this.nativeRefreshSettleTimer = -1;
+    }
   }
 
   loadUrl(url: string): boolean {

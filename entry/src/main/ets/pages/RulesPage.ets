@@ -38,6 +38,7 @@ export struct RulesPage {
   @Prop dohProvider: string = '';
   @Prop browserDohEnabled: boolean = true;
   @Prop browserDohProvider: string = '';
+  @Prop vpnPictureInPictureEnabled: boolean = false;
   @Prop selectedSplitAppCount: number = 0;
   @State private editingAgentRuleId: string = '';
   @State private draftAgentRuleType: AgentRuleType = 'wifiGateway';
@@ -68,6 +69,7 @@ export struct RulesPage {
   onSelectDohProvider: (provider: string) => void = () => {};
   onToggleBrowserDoh: () => void = () => {};
   onSelectBrowserDohProvider: (provider: string) => void = () => {};
+  onToggleVpnPictureInPicture: () => void = () => {};
   onOpenAppPicker: () => void = () => {};
   onOpenIssueReport: () => void = () => {};
 
@@ -79,6 +81,7 @@ export struct RulesPage {
         if (this.smartAgentEnabled) {
           this.buildAgentRuleList();
         }
+        this.buildVpnPictureInPictureCard();
         this.buildDohCard();
         this.buildBrowserDohCard();
         this.buildNavigationRuleCard('Github Issue Report', '前往Github 反馈问题');
@@ -94,6 +97,41 @@ export struct RulesPage {
     .height('100%')
     .backgroundColor(PAGE_BACKGROUND)
     .scrollBar(BarState.Off)
+  }
+
+  @Builder
+  private buildVpnPictureInPictureCard() {
+    Row() {
+      Column() {
+        Text('VPN 通道监控')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(TEXT_PRIMARY)
+          .maxLines(1)
+        Text('通过画中画监控并恢复 VPN 通道')
+          .fontSize(13)
+          .fontColor(TEXT_SECONDARY)
+          .margin({ top: 10 })
+          .maxLines(2)
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Row() {
+        this.buildRuleSwitchFace('vpnPictureInPicture');
+      }
+    }
+    .width('100%')
+    .height(100)
+    .padding({ left: 22, right: 26 })
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(CARD_RADIUS)
+    .shadow({ radius: 16, color: '#08000000', offsetX: 0, offsetY: 5 })
+    .margin({ bottom: 18 })
+    .onClick(() => {
+      this.onToggleVpnPictureInPicture();
+    })
   }
 
   @Builder
@@ -1570,6 +1608,9 @@ export struct RulesPage {
     }
     if (switchKey === 'browserDoh') {
       return this.browserDohEnabled;
+    }
+    if (switchKey === 'vpnPictureInPicture') {
+      return this.vpnPictureInPictureEnabled;
     }
     return false;
   }

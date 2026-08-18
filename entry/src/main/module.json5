@@ -22,6 +22,7 @@
         "startWindowIcon": "$media:app_start_icon",
         "startWindowBackground": "$color:start_window_background",
         "orientation": "portrait",
+        "recoverable": true,
         "backgroundModes": [
           "dataTransfer"
         ],

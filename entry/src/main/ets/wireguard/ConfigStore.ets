@@ -15,6 +15,10 @@ export interface ActiveTunnelInfo {
   configText: string;
 }
 
+export function hasActiveTunnelSelection(activeInfo: ActiveTunnelInfo): boolean {
+  return activeInfo.id.trim().length > 0 && activeInfo.configText.trim().length > 0;
+}
+
 export interface TunnelRuntimeStatus {
   running: boolean;
   tunnelId: string;
@@ -119,6 +123,7 @@ const DOH_ENABLED_KEY = 'wg_doh_enabled';
 const DOH_PROVIDER_KEY = 'wg_doh_provider';
 const BROWSER_DOH_ENABLED_KEY = 'wg_browser_doh_enabled';
 const BROWSER_DOH_PROVIDER_KEY = 'wg_browser_doh_provider';
+const VPN_PICTURE_IN_PICTURE_ENABLED_KEY = 'wg_vpn_picture_in_picture_enabled';
 const WEB_PINNED_URL_KEY = 'wg_web_pinned_url';
 const WEB_LAST_URL_KEY = 'wg_web_last_url';
 const WEB_SHORTCUT_URL_PREFIX = 'wg_web_shortcut_url_';
@@ -173,16 +178,12 @@ export async function loadActiveTunnelInfo(
 ): Promise<ActiveTunnelInfo> {
   const store = await getMainStoreForLoad(context, reloadFromDisk);
   const configValue = await store.get(ACTIVE_CONFIG_KEY, '');
-  const legacyValue = await store.get(LEGACY_CONFIG_KEY, '');
   const idValue = await store.get(ACTIVE_TUNNEL_ID_KEY, '');
   const nameValue = await store.get(ACTIVE_TUNNEL_NAME_KEY, '');
-  const activeConfig = configValue as string;
-  const legacyConfig = legacyValue as string;
-  const configText = activeConfig.length > 0 ? activeConfig : legacyConfig;
   const info: ActiveTunnelInfo = {
     id: idValue as string,
     name: nameValue as string,
-    configText: configText
+    configText: configValue as string
   };
   return info;
 }
@@ -445,6 +446,20 @@ export async function loadSmartAgentEnabled(
 ): Promise<boolean> {
   const store = await getMainStoreForLoad(context, reloadFromDisk);
   return await store.get(SMART_AGENT_ENABLED_KEY, false) as boolean;
+}
+
+export async function saveVpnPictureInPictureEnabled(context: StoreContext, enabled: boolean): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(VPN_PICTURE_IN_PICTURE_ENABLED_KEY, enabled);
+  await store.flush();
+}
+
+export async function loadVpnPictureInPictureEnabled(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<boolean> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  return await store.get(VPN_PICTURE_IN_PICTURE_ENABLED_KEY, false) as boolean;
 }
 
 export async function saveAgentRules(context: StoreContext, rules: AgentRule[]): Promise<void> {

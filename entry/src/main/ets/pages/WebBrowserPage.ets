@@ -62,390 +62,6 @@ const WEB_HOME_TAB_ID = WEB_CONTROLLER_ID_APP;
 const WEB_BOOKMARKS_HOME_URL = 'about:smart-bookmarks';
 const WEB_BOOKMARKS_HOME_TAB_ID = 'smart_agent_web_bookmarks';
 const WEB_NOTICE_DURATION_MS = 2500;
-const WEB_BROWSER_INLINE_PIP_BUTTON_SCRIPT = `
-(function () {
-  try {
-    if (location.hostname !== 'm.youtube.com') {
-      return false;
-    }
-
-    var win = window;
-    var doc = document;
-    var key = '__smartAgentInlinePip';
-    var state = win[key];
-
-    function visitRoots(visitor) {
-      var queue = [doc];
-      var visited = [];
-      while (queue.length > 0) {
-        var root = queue.shift();
-        if (!root || visited.indexOf(root) >= 0) {
-          continue;
-        }
-        visited.push(root);
-        var result = visitor(root);
-        if (result) {
-          return result;
-        }
-        var elements = [];
-        try {
-          elements = root.querySelectorAll('*');
-        } catch (err) {
-          elements = [];
-        }
-        for (var i = 0; i < elements.length; i++) {
-          var element = elements[i];
-          if (element && element.shadowRoot) {
-            queue.push(element.shadowRoot);
-          }
-        }
-      }
-      return null;
-    }
-
-    function collectAll(selector) {
-      var queue = [doc];
-      var visited = [];
-      var results = [];
-      while (queue.length > 0) {
-        var root = queue.shift();
-        if (!root || visited.indexOf(root) >= 0) {
-          continue;
-        }
-        visited.push(root);
-        try {
-          var found = root.querySelectorAll(selector);
-          for (var i = 0; i < found.length; i++) {
-            results.push(found[i]);
-          }
-        } catch (err) {
-        }
-        var elements = [];
-        try {
-          elements = root.querySelectorAll('*');
-        } catch (err) {
-          elements = [];
-        }
-        for (var j = 0; j < elements.length; j++) {
-          var element = elements[j];
-          if (element && element.shadowRoot) {
-            queue.push(element.shadowRoot);
-          }
-        }
-      }
-      return results;
-    }
-
-    if (state && state.installed) {
-      try {
-        state.refresh();
-      } catch (err) {
-      }
-      return true;
-    }
-
-    state = {
-      installed: true,
-      button: null,
-      observer: null,
-      pollTimer: 0,
-      refreshTimers: []
-    };
-    win[key] = state;
-
-    state.findFullscreenButton = function () {
-      return visitRoots(function (root) {
-        try {
-          return root.querySelector('button.fullscreen-icon') ||
-            root.querySelector('button[aria-label*="全屏"]') ||
-            root.querySelector('button[aria-label*="Fullscreen"]');
-        } catch (err) {
-          return null;
-        }
-      });
-    };
-
-    state.findHost = function () {
-      var fullscreenButton = state.findFullscreenButton();
-      if (!fullscreenButton || !fullscreenButton.parentElement) {
-        return null;
-      }
-      return fullscreenButton.parentElement;
-    };
-
-    state.findVideo = function () {
-      var videos = collectAll('video');
-      var fallback = null;
-      for (var i = 0; i < videos.length; i++) {
-        var video = videos[i];
-        if (!video || video.disablePictureInPicture) {
-          continue;
-        }
-        if (!fallback) {
-          fallback = video;
-        }
-        if (!video.paused && !video.ended) {
-          return video;
-        }
-      }
-      return fallback;
-    };
-
-    state.removeStaleButtons = function (keepButton) {
-      var buttons = collectAll('.smart-agent-pip-button');
-      for (var i = 0; i < buttons.length; i++) {
-        var button = buttons[i];
-        if (button !== keepButton && button && button.parentElement) {
-          button.parentElement.removeChild(button);
-        }
-      }
-    };
-
-    state.updateButtonState = function (button) {
-      if (!button) {
-        return;
-      }
-      var video = state.findVideo();
-      var active = !!doc.pictureInPictureElement;
-      var enabled = !!video && !!doc.pictureInPictureEnabled && !video.disablePictureInPicture;
-      button.disabled = !enabled;
-      button.style.opacity = enabled ? '1' : '0.48';
-      button.setAttribute('aria-label', active ? '退出画中画' : '开启画中画');
-      button.setAttribute('title', active ? '退出画中画' : '开启画中画');
-    };
-
-    state.ensureButton = function () {
-      var host = state.findHost();
-      if (!host) {
-        if (state.button && state.button.parentElement) {
-          state.button.parentElement.removeChild(state.button);
-        }
-        state.button = null;
-        return null;
-      }
-
-      host.style.display = 'flex';
-      host.style.alignItems = 'center';
-      host.style.flexWrap = 'nowrap';
-
-      if (state.button && state.button.parentElement === host) {
-        state.removeStaleButtons(state.button);
-        state.updateButtonState(state.button);
-        return state.button;
-      }
-
-      state.removeStaleButtons(null);
-
-      var button = doc.createElement('button');
-      button.className = 'icon-button fullscreen-icon smart-agent-pip-button';
-      button.type = 'button';
-      button.setAttribute('aria-label', '开启画中画');
-      button.setAttribute('title', '开启画中画');
-      button.style.display = 'block';
-      button.style.boxSizing = 'border-box';
-      button.style.width = '48px';
-      button.style.height = '48px';
-      button.style.padding = '6px';
-      button.style.margin = '0';
-      button.style.border = '0';
-      button.style.background = 'transparent';
-      button.style.color = '#fff';
-      button.style.flex = '0 0 auto';
-      button.style.cursor = 'pointer';
-      button.style.webkitAppearance = 'none';
-
-      var visible = doc.createElement('div');
-      visible.className = 'player-bottom-controls-fullscreen-icon-visible-area';
-      visible.style.boxSizing = 'border-box';
-      visible.style.width = '36px';
-      visible.style.height = '36px';
-      visible.style.borderRadius = '50%';
-      visible.style.padding = '6px';
-      visible.style.background = 'rgba(0, 0, 0, 0.3)';
-      visible.style.textShadow = '0 0 2px #000';
-
-      var icon = doc.createElement('c3-icon');
-      icon.style.display = 'inline-flex';
-      icon.style.flexShrink = '0';
-      icon.style.width = '24px';
-      icon.style.height = '24px';
-      icon.style.fill = 'currentColor';
-      icon.style.stroke = 'none';
-
-      var span = doc.createElement('span');
-      span.className = 'yt-icon-shape ytSpecIconShapeHost';
-
-      var holder = doc.createElement('div');
-      holder.style.width = '100%';
-      holder.style.height = '100%';
-      holder.style.display = 'block';
-      holder.style.fill = 'currentColor';
-
-      var svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-      svg.setAttribute('height', '24');
-      svg.setAttribute('viewBox', '0 0 24 24');
-      svg.setAttribute('width', '24');
-      svg.setAttribute('focusable', 'false');
-      svg.setAttribute('aria-hidden', 'true');
-      svg.style.pointerEvents = 'none';
-      svg.style.display = 'inherit';
-      svg.style.width = '100%';
-      svg.style.height = '100%';
-
-      var path1 = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path1.setAttribute('d', 'M4 6h16v12H4V6Zm2 2v8h12V8H6Z');
-      var path2 = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path2.setAttribute('d', 'M13 10h5v5h-5z');
-
-      svg.appendChild(path1);
-      svg.appendChild(path2);
-      holder.appendChild(svg);
-      span.appendChild(holder);
-      icon.appendChild(span);
-      visible.appendChild(icon);
-      button.appendChild(visible);
-
-      button.addEventListener('click', async function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-        var video = state.findVideo();
-        if (!video || !doc.pictureInPictureEnabled || video.disablePictureInPicture) {
-          state.updateButtonState(button);
-          return;
-        }
-        try {
-          if (doc.pictureInPictureElement === video) {
-            await doc.exitPictureInPicture();
-          } else {
-            await video.requestPictureInPicture();
-          }
-        } catch (err) {
-        }
-        win.setTimeout(function () {
-          state.refresh();
-        }, 0);
-      }, true);
-
-      host.appendChild(button);
-      state.button = button;
-      state.updateButtonState(button);
-      state.removeStaleButtons(button);
-      return button;
-    };
-
-    state.scanVideos = function () {
-      var videos = collectAll('video');
-      for (var i = 0; i < videos.length; i++) {
-        var video = videos[i];
-        if (!video || video.__smartAgentPipBound) {
-          continue;
-        }
-        video.__smartAgentPipBound = true;
-        var refresh = function () {
-          state.refresh();
-        };
-        video.addEventListener('loadedmetadata', refresh, true);
-        video.addEventListener('loadeddata', refresh, true);
-        video.addEventListener('canplay', refresh, true);
-        video.addEventListener('play', refresh, true);
-        video.addEventListener('pause', refresh, true);
-        video.addEventListener('ended', refresh, true);
-        video.addEventListener('enterpictureinpicture', refresh, true);
-        video.addEventListener('leavepictureinpicture', refresh, true);
-      }
-    };
-
-    state.scheduleRefresh = function () {
-      for (var i = 0; i < state.refreshTimers.length; i++) {
-        win.clearTimeout(state.refreshTimers[i]);
-      }
-      state.refreshTimers = [];
-      var delays = [0, 80, 240, 600];
-      for (var j = 0; j < delays.length; j++) {
-        state.refreshTimers.push(win.setTimeout(function () {
-          state.refresh();
-        }, delays[j]));
-      }
-    };
-
-    state.refresh = function () {
-      state.scanVideos();
-      var button = state.ensureButton();
-      if (!button) {
-        return;
-      }
-      state.updateButtonState(button);
-    };
-
-    var wrapHistory = function (name) {
-      var raw = history[name];
-      if (typeof raw !== 'function' || raw.__smartAgentPipWrapped) {
-        return;
-      }
-      history[name] = function () {
-        var result = raw.apply(this, arguments);
-        win.setTimeout(function () {
-          state.refresh();
-        }, 0);
-        return result;
-      };
-      history[name].__smartAgentPipWrapped = true;
-    };
-
-    wrapHistory('pushState');
-    wrapHistory('replaceState');
-    win.addEventListener('popstate', function () {
-      state.refresh();
-    }, true);
-    doc.addEventListener('play', function () {
-      state.refresh();
-    }, true);
-    doc.addEventListener('pause', function () {
-      state.refresh();
-    }, true);
-    doc.addEventListener('visibilitychange', function () {
-      state.refresh();
-    }, true);
-    doc.addEventListener('click', function () {
-      state.scheduleRefresh();
-    }, true);
-    doc.addEventListener('touchstart', function () {
-      state.scheduleRefresh();
-    }, true);
-    doc.addEventListener('pointerup', function () {
-      state.scheduleRefresh();
-    }, true);
-    win.addEventListener('load', function () {
-      state.refresh();
-    }, true);
-    win.addEventListener('resize', function () {
-      state.refresh();
-    }, true);
-
-    if (win.MutationObserver) {
-      state.observer = new MutationObserver(function () {
-        state.refresh();
-      });
-      if (doc.documentElement) {
-        state.observer.observe(doc.documentElement, { childList: true, subtree: true });
-      }
-    }
-
-    if (state.pollTimer) {
-      win.clearInterval(state.pollTimer);
-    }
-    state.pollTimer = win.setInterval(function () {
-      state.refresh();
-    }, 1500);
-
-    state.refresh();
-    return true;
-  } catch (err) {
-    return false;
-  }
-})()
-`;
 const WEB_BROWSER_PULL_REFRESH_POLICY_SCRIPT =
   'JSON.stringify((function(){' +
     'try{' +
@@ -488,7 +104,6 @@ export struct WebBrowserPage {
   @Prop allowBookmarkHome: boolean = true;
   @Prop showAddressBar: boolean = true;
   @Prop @Watch('onBookmarkHomeVisibleFromHostChanged') bookmarkHomeVisibleFromHost: boolean = false;
-  @Prop @Watch('onBackgroundPipRevisionFromHostChanged') backgroundPipRevisionFromHost: number = 0;
   @Prop homeTabBackCountFromHost: number = 0;
   @Prop @Watch('onTabStateRevisionFromHostChanged') tabStateRevisionFromHost: number = 0;
   @Prop @Watch('onClearTabStackRevisionFromHostChanged') clearTabStackRevisionFromHost: number = 0;
@@ -570,7 +185,6 @@ export struct WebBrowserPage {
   private addressEditedSinceFocus: boolean = false;
   private addressSuggestionLoadVersion: number = 0;
   private handledClearTabStackRevision: number = 0;
-  private handledBackgroundPipRevision: number = 0;
   private hostEverActive: boolean = false;
   private firstContentVisibleNotified: boolean = false;
   @State private webSurfaceKeys: string[] = [];
@@ -580,7 +194,6 @@ export struct WebBrowserPage {
   aboutToAppear(): void {
     this.configureBrowserStorage();
     this.hostEverActive = this.hostActive;
-    this.handledBackgroundPipRevision = this.backgroundPipRevisionFromHost;
     const normalized = this.normalizeUrl(this.initialUrl);
     this.instanceId = this.instanceStateId();
     const restoredHomeState = this.readLaunchTabStateMeta(this.instanceId, normalized);
@@ -1038,11 +651,11 @@ export struct WebBrowserPage {
     if (!this.shouldHandleWebSurface(surfaceKey)) {
       return;
     }
+    this.endPullRefresh(surfaceKey);
     this.syncUrlFromController();
     this.updateNavigationState();
     this.syncSurfaceTabStackSize(surfaceKey);
     this.persistWebState();
-    this.installInlinePictureInPictureButton(surfaceKey);
     this.notifyFirstContentVisible();
   }
 
@@ -1080,7 +693,6 @@ export struct WebBrowserPage {
     this.persistWebHistory(this.currentUrl, this.pageTitleUrl === this.currentUrl ? this.pageTitle.trim() : '');
     this.prepareShortcut(this.currentUrl);
     this.detectPwaApp(this.currentUrl);
-    this.installInlinePictureInPictureButton(surfaceKey);
     this.probeBrowserPullRefreshPolicy(surfaceKey);
   }
 
@@ -1289,27 +901,6 @@ export struct WebBrowserPage {
     }
     this.showWebError(surfaceKey, event);
     this.onNavigationFailed();
-  }
-
-  private installInlinePictureInPictureButton(surfaceKey: string): void {
-    const surface = this.webSurfaceByKey(surfaceKey);
-    if (surface === undefined || !surface.attached || !this.isActiveWebSurface(surfaceKey) ||
-      this.bookmarkHomeVisible || this.webFullScreen) {
-      return;
-    }
-
-    try {
-      surface.controller.runJavaScript(WEB_BROWSER_INLINE_PIP_BUTTON_SCRIPT).catch((err: BusinessError) => {
-        hilog.info(DOMAIN, TAG, 'install inline pip button failed surface=%{public}s error=%{public}s',
-          surfaceKey,
-          this.formatError(err));
-      });
-    } catch (err) {
-      const error = err as BusinessError;
-      hilog.info(DOMAIN, TAG, 'install inline pip button rejected surface=%{public}s error=%{public}s',
-        surfaceKey,
-        this.formatError(error));
-    }
   }
 
   private handleWebSurfaceExternalNavigation(surfaceKey: string, url: string): void {
@@ -1660,7 +1251,6 @@ export struct WebBrowserPage {
     this.loading = false;
     this.progress = 100;
     this.prepareShortcut(this.currentUrl);
-    this.installInlinePictureInPictureButton(surfaceKey);
     this.probeBrowserPullRefreshPolicy(surfaceKey);
     this.notifyFirstContentVisible();
   }
@@ -1729,7 +1319,6 @@ export struct WebBrowserPage {
   private onHostActiveChanged(): void {
     if (this.hostActive) {
       this.hostEverActive = true;
-      this.handledBackgroundPipRevision = this.backgroundPipRevisionFromHost;
     }
   }
 
@@ -1769,17 +1358,6 @@ export struct WebBrowserPage {
       this.activateAttachedSurface(this.webSurfaceKey);
     }
     this.updateNavigationState();
-  }
-
-  private onBackgroundPipRevisionFromHostChanged(): void {
-    if (!this.hostActive) {
-      return;
-    }
-    if (this.backgroundPipRevisionFromHost <= 0 ||
-      this.backgroundPipRevisionFromHost === this.handledBackgroundPipRevision) {
-      return;
-    }
-    this.handledBackgroundPipRevision = this.backgroundPipRevisionFromHost;
   }
 
   private onTabStateRevisionFromHostChanged(): void {

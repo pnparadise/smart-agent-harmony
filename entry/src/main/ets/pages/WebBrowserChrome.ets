@@ -308,33 +308,24 @@ export struct WebBrowserChrome {
 
   @Builder
   private buildPullRefreshIndicator() {
-    Stack({ alignContent: Alignment.TopStart }) {
-      Stack() {
-        Image($r('app.media.ic_pull_refresh_gray'))
-          .width(24)
-          .height(24)
-          .rotate({ angle: this.pullRefreshRotation })
-      }
-      .width(PULL_REFRESH_INDICATOR_SIZE)
-      .height(PULL_REFRESH_INDICATOR_SIZE)
-      .backgroundColor(CARD_BACKGROUND)
-      .borderRadius(PULL_REFRESH_INDICATOR_SIZE / 2)
-      .shadow({ radius: 14, color: '#24000000', offsetX: 0, offsetY: 5 })
-      .position({
-        x: '50%',
-        y: this.pullRefreshOffset
-      })
-      .translate({ x: -PULL_REFRESH_INDICATOR_SIZE / 2, y: 0, z: 0 })
-      .opacity(this.pullRefreshIndicatorOpacity())
-      .animation({ duration: 120, curve: Curve.EaseOut })
+    Stack() {
+      Image($r('app.media.ic_pull_refresh_gray'))
+        .width(24)
+        .height(24)
+        .rotate({ angle: this.pullRefreshRotation })
     }
-    .width('100%')
-    .height('100%')
+    .width(PULL_REFRESH_INDICATOR_SIZE)
+    .height(PULL_REFRESH_INDICATOR_SIZE)
+    .backgroundColor(CARD_BACKGROUND)
+    .borderRadius(PULL_REFRESH_INDICATOR_SIZE / 2)
+    .shadow({ radius: 14, color: '#24000000', offsetX: 0, offsetY: 5 })
     .position({
-      x: 0,
-      y: this.pullRefreshTopOffset()
+      x: '50%',
+      y: this.pullRefreshTopOffset() + this.pullRefreshOffset
     })
-    .clip(true)
+    .translate({ x: -PULL_REFRESH_INDICATOR_SIZE / 2, y: 0, z: 0 })
+    .opacity(this.pullRefreshIndicatorOpacity())
+    .animation({ duration: 120, curve: Curve.EaseOut })
     .zIndex(18)
   }
 
@@ -479,8 +470,7 @@ export struct WebBrowserChrome {
   }
 
   private hasBlockingOverlay(): boolean {
-    return this.pullRefreshVisible || this.webError.visible ||
-      this.addBookmarkConfirmVisible || this.deleteBookmarkConfirmVisible;
+    return this.webError.visible || this.addBookmarkConfirmVisible || this.deleteBookmarkConfirmVisible;
   }
 
   private toolbarContentHeight(): number {

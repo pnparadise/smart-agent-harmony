@@ -5,6 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import {
+  hasActiveTunnelSelection,
   loadActiveTunnelInfo,
   loadTunnelRuntimeStatus,
   loadLastWebShortcutUrl,
@@ -13,8 +14,8 @@ import {
   WebBookmarkEntry
 } from '../wireguard/ConfigStore';
 import { syncWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
+import { SmartAgentStrategy } from '../wireguard/SmartAgentStrategy';
 import { activateImmersiveWindow, configureImmersiveWindow } from './ImmersiveWindow';
-import { notifyWebBrowserBackgroundForPictureInPicture } from './WebBrowserPictureInPictureEvents';
 import { setCurrentWebShortcut } from './WebShortcutState';
 import { WEB_SHORTCUT_CLOSE_EVENT } from './WebShortcutCloseEvents';
 
@@ -25,6 +26,7 @@ const MODULE_NAME = 'entry';
 const VPN_ABILITY = 'WgVpnExtensionAbility';
 const VPN_ACTION_RESTORE = 'restore';
 const VPN_RUNTIME_ALIVE_MAX_AGE_MS = 10000;
+const VPN_STARTUP_GRACE_MS = 15000;
 const WEB_SHORTCUT_URL_KEY = 'webUrl';
 const WEB_SHORTCUT_ID_KEY = 'webShortcutId';
 const WEB_SHORTCUT_URL_STORAGE_KEY = 'webShortcutInitialUrl';
@@ -104,7 +106,6 @@ export default class WebShortcutAbility extends UIAbility {
 
   onBackground(): void {
     hilog.info(DOMAIN, TAG, 'onBackground');
-    notifyWebBrowserBackgroundForPictureInPicture();
   }
 
   onWindowStageDestroy(): void {
@@ -121,14 +122,24 @@ export default class WebShortcutAbility extends UIAbility {
     this.vpnRestoreInFlight = true;
     try {
       const activeInfo = await loadActiveTunnelInfo(this.context, true);
-      const hasActiveTunnel = activeInfo.id.length > 0 || activeInfo.name.length > 0;
-      if (!hasActiveTunnel) {
+      if (!hasActiveTunnelSelection(activeInfo)) {
         hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, no active tunnel', reason);
         return;
       }
 
+      const decision = await new SmartAgentStrategy(this.context).resolveDecision();
+      if (!decision.shouldConnectVpn || !hasActiveTunnelSelection(decision.selectedActiveInfo)) {
+        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, smart agent direct', reason);
+        return;
+      }
+
       const runtimeStatus = await loadTunnelRuntimeStatus(this.context, true);
-      if (this.isRuntimeStatusAlive(runtimeStatus.running, runtimeStatus.updatedAt)) {
+      if (this.isRuntimeStatusAlive(
+        runtimeStatus.running,
+        runtimeStatus.tunnelId,
+        runtimeStatus.updatedAt,
+        decision.selectedActiveInfo.id
+      )) {
         hilog.info(
           DOMAIN,
           TAG,
@@ -138,6 +149,11 @@ export default class WebShortcutAbility extends UIAbility {
         );
         return;
       }
+      if (!runtimeStatus.running && runtimeStatus.tunnelId === decision.selectedActiveInfo.id &&
+        runtimeStatus.updatedAt > 0 && Date.now() - runtimeStatus.updatedAt <= VPN_STARTUP_GRACE_MS) {
+        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, startup pending', reason);
+        return;
+      }
 
       await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
       hilog.info(
@@ -145,16 +161,24 @@ export default class WebShortcutAbility extends UIAbility {
         TAG,
         'WebShortcutAbility vpn restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
         reason,
-        activeInfo.id,
-        activeInfo.name
+        decision.selectedActiveInfo.id,
+        decision.selectedActiveInfo.name
       );
     } finally {
       this.vpnRestoreInFlight = false;
     }
   }
 
-  private isRuntimeStatusAlive(running: boolean, updatedAt: number): boolean {
-    if (!running || updatedAt <= 0) {
+  private isRuntimeStatusAlive(
+    running: boolean,
+    tunnelId: string,
+    updatedAt: number,
+    expectedTunnelId: string
+  ): boolean {
+    if (!running || tunnelId.length === 0 || updatedAt <= 0) {
+      return false;
+    }
+    if (expectedTunnelId.length === 0 || tunnelId !== expectedTunnelId) {
       return false;
     }
     return Date.now() - updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;

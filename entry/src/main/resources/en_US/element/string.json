@@ -11,6 +11,10 @@
     {
       "name": "browser_shortcut_label",
       "value": "Browser"
+    },
+    {
+      "name": "vpn_pip_drag_hint",
+      "value": "Drag to the screen edge to hide"
     }
   ]
 }

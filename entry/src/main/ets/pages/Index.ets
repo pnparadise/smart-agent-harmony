@@ -12,6 +12,7 @@ import {
   clearActiveTunnel,
   createAgentRuleId,
   createTunnelId,
+  hasActiveTunnelSelection,
   loadBrowserDohSettings,
   deleteTunnel,
   DEFAULT_DOH_PROVIDER,
@@ -24,6 +25,7 @@ import {
   loadSmartAgentEnabled,
   loadTunnelRuntimeStatus,
   loadTunnels,
+  loadVpnPictureInPictureEnabled,
   saveAgentRules,
   saveActiveTunnel,
   saveAppSplitEnabled,
@@ -33,12 +35,15 @@ import {
   saveSmartAgentEnabled,
   saveTunnelRuntimeStatus,
   saveTunnel,
+  saveVpnPictureInPictureEnabled,
   SplitAppInfo,
   TunnelConfig,
   TunnelRuntimeStatus
 } from '../wireguard/ConfigStore';
 import { applyWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
 import { startVpnDataTransferTask, stopVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
+import { SmartAgentStrategy } from '../wireguard/SmartAgentStrategy';
+import { VpnPictureInPictureManager } from '../entryability/VpnPictureInPictureManager';
 import { DEFAULT_WG_CONFIG, parseWireGuardConfig } from '../wireguard/WireGuardConfig';
 import { AppPickerPage } from './AppPickerPage';
 import { LogsPage } from './LogsPage';
@@ -126,6 +131,7 @@ struct Index {
   @State private dohProvider: string = DEFAULT_DOH_PROVIDER;
   @State private browserDohEnabled: boolean = true;
   @State private browserDohProvider: string = DEFAULT_DOH_PROVIDER;
+  @State private vpnPictureInPictureEnabled: boolean = false;
   @State private selectedSplitApps: SplitAppInfo[] = [];
   @State private appPickerOpen: boolean = false;
   @State private availableSplitApps: SplitAppInfo[] = [];
@@ -146,6 +152,7 @@ struct Index {
   private smartAgentLoadVersion: number = 0;
   private dohLoadVersion: number = 0;
   private browserDohLoadVersion: number = 0;
+  private vpnPictureInPictureLoadVersion: number = 0;
   private logsLoadVersion: number = 0;
 
   aboutToAppear(): void {
@@ -155,6 +162,7 @@ struct Index {
     this.loadSmartAgentSettings();
     this.loadDohSettings();
     this.loadBrowserDohSettings();
+    this.loadVpnPictureInPictureSetting();
     if (this.currentTabIndex === TAB_LOGS) {
       this.loadLogs();
     }
@@ -439,6 +447,7 @@ struct Index {
             dohProvider: this.dohProvider,
             browserDohEnabled: this.browserDohEnabled,
             browserDohProvider: this.browserDohProvider,
+            vpnPictureInPictureEnabled: this.vpnPictureInPictureEnabled,
             selectedSplitAppCount: this.selectedSplitApps.length,
             onToggleAppSplit: () => {
               this.toggleAppSplit().catch((err: BusinessError) => {
@@ -483,6 +492,11 @@ struct Index {
             },
             onSelectBrowserDohProvider: (provider: string) => {
               this.selectBrowserDohProvider(provider).catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onToggleVpnPictureInPicture: () => {
+              this.toggleVpnPictureInPicture().catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
@@ -716,6 +730,25 @@ struct Index {
     }
   }
 
+  private async loadVpnPictureInPictureSetting(): Promise<void> {
+    const loadVersion = ++this.vpnPictureInPictureLoadVersion;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const enabled = await loadVpnPictureInPictureEnabled(context, true);
+      if (loadVersion !== this.vpnPictureInPictureLoadVersion) {
+        return;
+      }
+      this.vpnPictureInPictureEnabled = enabled;
+      await this.syncVpnPictureInPicture();
+    } catch (err) {
+      if (loadVersion !== this.vpnPictureInPictureLoadVersion) {
+        return;
+      }
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load vpn picture in picture setting failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
   private async toggleSmartAgent(): Promise<void> {
     this.smartAgentLoadVersion++;
     const nextEnabled = !this.smartAgentEnabled;
@@ -723,6 +756,34 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     await saveSmartAgentEnabled(context, nextEnabled);
     await this.refreshVpnStatusForIndependentSettings('smart agent toggle');
+  }
+
+  private async toggleVpnPictureInPicture(): Promise<void> {
+    this.vpnPictureInPictureLoadVersion++;
+    const nextEnabled = !this.vpnPictureInPictureEnabled;
+    this.vpnPictureInPictureEnabled = nextEnabled;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveVpnPictureInPictureEnabled(context, nextEnabled);
+    await this.syncVpnPictureInPicture();
+  }
+
+  private async syncVpnPictureInPicture(): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    if (!this.vpnPictureInPictureEnabled) {
+      VpnPictureInPictureManager.getInstance().configure(context, this.getUIContext(), false);
+      return;
+    }
+    const activeInfo = await loadActiveTunnelInfo(context, true);
+    if (!hasActiveTunnelSelection(activeInfo)) {
+      VpnPictureInPictureManager.getInstance().configure(context, this.getUIContext(), false);
+      return;
+    }
+    const decision = await new SmartAgentStrategy(context).resolveDecision();
+    VpnPictureInPictureManager.getInstance().configure(
+      context,
+      this.getUIContext(),
+      decision.shouldConnectVpn && hasActiveTunnelSelection(decision.selectedActiveInfo)
+    );
   }
 
   private async saveAgentRuleFromPage(rule: AgentRule): Promise<void> {
@@ -1336,17 +1397,19 @@ struct Index {
       tunnel.name,
       String(switching)
     );
+    await this.syncVpnPictureInPicture();
   }
 
   private async stopActiveVpn(): Promise<void> {
     hilog.info(DOMAIN, TAG, 'stop active vpn requested activeId=%{public}s runtimeRunning=%{public}s', this.activeTunnelId, String(this.runtimeRunning));
     const context = getContext(this) as common.UIAbilityContext;
+    await clearActiveTunnel(context);
+    this.activeTunnelId = '';
+    VpnPictureInPictureManager.getInstance().configure(context, this.getUIContext(), false);
     await vpnExtension.stopVpnExtensionAbility(this.buildWant());
     await this.stopVpnContinuousTask(context, 'stop vpn');
-    await clearActiveTunnel(context);
     await saveTunnelRuntimeStatus(context, this.buildStoppedRuntimeStatus());
     this.vpnEnabled = false;
-    this.activeTunnelId = '';
     this.runtimeRunning = false;
     this.runtimeTunnelId = '';
     this.runtimeTunnelName = '';
@@ -1359,6 +1422,7 @@ struct Index {
     this.runtimeConfirmedRunning = false;
     this.clearRequestedRuntimeTunnel();
     this.statusText = 'Stopped';
+    await this.syncVpnPictureInPicture();
     hilog.info(DOMAIN, TAG, 'stop active vpn finished');
   }
 
@@ -1575,7 +1639,7 @@ struct Index {
     }
     if (this.activeTunnelId.length === 0 && this.startingTunnelId.length === 0 && this.runtimeTunnelId.length === 0) {
       const activeInfo = await loadActiveTunnelInfo(context, true);
-      if (activeInfo.configText.length === 0) {
+      if (!hasActiveTunnelSelection(activeInfo)) {
         return false;
       }
     }
@@ -1889,13 +1953,19 @@ struct Index {
   private async ensureActiveTunnelRunningOnVpnHome(reason: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     const activeInfo = await loadActiveTunnelInfo(context, true);
-    const hasActiveTunnel = activeInfo.configText.length > 0 || activeInfo.id.length > 0 || activeInfo.name.length > 0;
-    if (!hasActiveTunnel) {
+    if (!hasActiveTunnelSelection(activeInfo)) {
+      return;
+    }
+
+    const decision = await new SmartAgentStrategy(context).resolveDecision();
+    if (!decision.shouldConnectVpn || !hasActiveTunnelSelection(decision.selectedActiveInfo)) {
+      hilog.info(DOMAIN, TAG, 'vpn home skip restore reason=%{public}s, smart agent direct', reason);
       return;
     }
 
     const runtimeStatus = await loadTunnelRuntimeStatus(context, true);
-    if (this.isRuntimeStatusAlive(runtimeStatus)) {
+    if (this.isRuntimeStatusAlive(runtimeStatus) &&
+      runtimeStatus.tunnelId === decision.selectedActiveInfo.id) {
       return;
     }
 
@@ -1904,10 +1974,13 @@ struct Index {
       TAG,
       'vpn home restore requested reason=%{public}s activeId=%{public}s activeName=%{public}s',
       reason,
-      activeInfo.id,
-      activeInfo.name
+      decision.selectedActiveInfo.id,
+      decision.selectedActiveInfo.name
     );
-    await saveTunnelRuntimeStatus(context, this.buildPendingRuntimeStatusByIdentity(activeInfo.id, activeInfo.name));
+    await saveTunnelRuntimeStatus(
+      context,
+      this.buildPendingRuntimeStatusByIdentity(decision.selectedActiveInfo.id, decision.selectedActiveInfo.name)
+    );
     try {
       await startVpnDataTransferTask(context);
       await vpnExtension.startVpnExtensionAbility(this.buildRestoreWant());
@@ -1919,7 +1992,7 @@ struct Index {
   }
 
   private isRuntimeStatusAlive(status: TunnelRuntimeStatus): boolean {
-    if (!status.running || status.updatedAt <= 0) {
+    if (!status.running || status.tunnelId.length === 0 || status.updatedAt <= 0) {
       return false;
     }
     return Date.now() - status.updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;

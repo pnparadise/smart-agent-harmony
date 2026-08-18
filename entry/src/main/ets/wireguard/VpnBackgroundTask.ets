@@ -21,8 +21,29 @@ const SYSTEM_PROGRESS_MAX = 100;
 
 let vpnDataTransferTaskStarted = false;
 let cachedDataTransferNotificationId = 0;
+let continuousTaskCancelListenerRegistered = false;
+let dataTransferTaskContext: common.UIAbilityContext | undefined = undefined;
+
+const continuousTaskCancelCallback = (info: backgroundTaskManager.ContinuousTaskCancelInfo): void => {
+  vpnDataTransferTaskStarted = false;
+  cachedDataTransferNotificationId = 0;
+  const context = dataTransferTaskContext;
+  dataTransferTaskContext = undefined;
+  if (context !== undefined) {
+    clearCancelledDataTransferNotificationId(context);
+  }
+  hilog.warn(
+    DOMAIN,
+    TAG,
+    'VpnBackgroundTask continuous task cancelled id=%{public}d reason=%{public}d',
+    info.id,
+    info.reason
+  );
+};
 
 export async function startVpnDataTransferTask(context: common.UIAbilityContext): Promise<void> {
+  dataTransferTaskContext = context;
+  ensureContinuousTaskCancelListener();
   const agent = await createVpnWantAgent();
   try {
     const notification = await backgroundTaskManager.startBackgroundRunning(
@@ -46,25 +67,53 @@ export async function startVpnDataTransferTask(context: common.UIAbilityContext)
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
+    dataTransferTaskContext = undefined;
     throw new Error('start continuous task failed: ' + formatError(error));
+  }
+}
+
+function ensureContinuousTaskCancelListener(): void {
+  if (continuousTaskCancelListenerRegistered) {
+    return;
+  }
+  try {
+    backgroundTaskManager.on('continuousTaskCancel', continuousTaskCancelCallback);
+    continuousTaskCancelListenerRegistered = true;
+  } catch (err) {
+    const error = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask register cancel listener failed: %{public}s', formatError(error));
+  }
+}
+
+async function clearCancelledDataTransferNotificationId(context: common.UIAbilityContext): Promise<void> {
+  try {
+    await clearDataTransferNotificationId(context);
+  } catch (err) {
+    const error = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask clear cancelled notification id failed: %{public}s', formatError(error));
   }
 }
 
 export async function stopVpnDataTransferTask(context: common.UIAbilityContext): Promise<void> {
   try {
     if (!vpnDataTransferTaskStarted && !await hasContinuousTask(context)) {
+      cachedDataTransferNotificationId = 0;
+      await clearDataTransferNotificationId(context);
+      dataTransferTaskContext = undefined;
       return;
     }
     await backgroundTaskManager.stopBackgroundRunning(context);
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
+    dataTransferTaskContext = undefined;
     hilog.info(DOMAIN, TAG, 'VpnBackgroundTask stop continuous task');
   } catch (err) {
     const error = err as BusinessError;
     vpnDataTransferTaskStarted = false;
     cachedDataTransferNotificationId = 0;
     await clearDataTransferNotificationId(context);
+    dataTransferTaskContext = undefined;
     hilog.warn(DOMAIN, TAG, 'VpnBackgroundTask stop continuous task failed: %{public}s', formatError(error));
   }
 }

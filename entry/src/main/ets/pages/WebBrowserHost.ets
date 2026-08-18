@@ -35,7 +35,6 @@ export struct WebBrowserHost {
   @Prop @Watch('onLaunchTargetChanged') initialUrl: string = DEFAULT_WEB_HOME_URL;
   @Prop @Watch('onLaunchTargetChanged') launchInstanceId: string = '';
   @Prop @Watch('onLaunchTargetChanged') launchRevision: number = 0;
-  @StorageProp('webBrowserBackgroundPipRevision') private backgroundPipRevision: number = 0;
   onClose: () => void = () => {};
   onFirstContentVisible: () => void = () => {};
   onNavigationFailed: () => void = () => {};
@@ -83,7 +82,6 @@ export struct WebBrowserHost {
           webControllerId: instance.id,
           instanceKind: instance.kind,
           hostActive: instance.id === this.activeInstanceId,
-          backgroundPipRevisionFromHost: instance.id === this.activeInstanceId ? this.backgroundPipRevision : 0,
           isHomeInstance: instance.id === WEB_HOME_INSTANCE_ID,
           allowBookmarkHome: instance.id === WEB_HOME_INSTANCE_ID,
           showAddressBar: instance.id === WEB_HOME_INSTANCE_ID,

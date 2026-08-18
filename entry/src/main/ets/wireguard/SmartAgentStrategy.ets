@@ -7,7 +7,7 @@ import {
   ActiveTunnelInfo,
   AgentRule,
   AgentRuleType,
-  loadConfig,
+  hasActiveTunnelSelection,
   loadActiveTunnelInfo,
   loadAgentRules,
   loadSmartAgentEnabled,
@@ -195,15 +195,14 @@ export class SmartAgentStrategy {
 
   private async resolveBaseActiveInfo(): Promise<ActiveTunnelInfo> {
     const activeInfo = await loadActiveTunnelInfo(this.context, true);
-    if (activeInfo.configText.length > 0) {
+    if (hasActiveTunnelSelection(activeInfo)) {
       return activeInfo;
     }
 
-    const fallbackConfig = await loadConfig(this.context, true);
     return {
-      id: activeInfo.id,
-      name: activeInfo.name,
-      configText: fallbackConfig
+      id: '',
+      name: '',
+      configText: ''
     };
   }
 
