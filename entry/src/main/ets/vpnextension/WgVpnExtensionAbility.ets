@@ -12,14 +12,17 @@ import {
   buildVpnRestartLogEntry,
   DEFAULT_DOH_PROVIDER,
   hasActiveTunnelSelection,
+  isVpnKeepAliveEnabled,
   loadAppSplitEnabled,
   loadActiveTunnelInfo,
   loadDohSettings,
+  loadVpnKeepAliveSettings,
   loadSelectedSplitApps,
   loadSmartAgentEnabled,
   saveTunnelRuntimeStatus,
   SplitAppInfo,
-  TunnelRuntimeStatus
+  TunnelRuntimeStatus,
+  VpnKeepAliveSettings
 } from '../wireguard/ConfigStore';
 import { SmartAgentDecision, SmartAgentStrategy } from '../wireguard/SmartAgentStrategy';
 import {
@@ -32,6 +35,7 @@ import {
 } from '../wireguard/WireGuardConfig';
 import { NativeTunnel, TunnelStats } from '../wireguard/NativeTunnel';
 import { updateVpnDataTransferNotification } from '../wireguard/VpnBackgroundTask';
+import { queryVpnNetworkAvailable } from '../wireguard/VpnNetworkMonitor';
 
 const DOMAIN = 0x0001;
 const TAG = 'WgVpnExtension';
@@ -40,7 +44,9 @@ const BUNDLE_NAME = 'com.smart.agent';
 const FORCE_HANDSHAKE_DEBOUNCE_MS = 1500;
 const DATA_TRANSFER_NOTIFICATION_INTERVAL_MS = 5000;
 const RUNTIME_STATUS_PUBLISH_INTERVAL_MS = 3000;
+const NATIVE_TUNNEL_HEALTH_INTERVAL_MS = 250;
 const WANT_ACTION_RESTORE = 'restore';
+const WANT_ACTION_NETWORK_LOST = 'networkLost';
 const DOH_RESOLVE_TIMEOUT_MS = 8000;
 
 interface DnsJsonAnswer {
@@ -74,9 +80,11 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private activeTunnelName: string = '';
   private runningConfigFingerprint: string = '';
   private restartQueue: Promise<void> = Promise.resolve();
+  private restartRequestCount: number = 0;
   private lastForceHandshakeAt: number = 0;
   private dataTransferNotificationTimer: number = -1;
   private runtimeStatusPublishTimer: number = -1;
+  private nativeTunnelHealthTimer: number = -1;
   private lastNotifiedTxBytes: number = -1;
   private lastNotifiedRxBytes: number = -1;
   private lastLoggedTunReadPackets: number = -1;
@@ -84,6 +92,8 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private lastLoggedUdpReadPackets: number = -1;
   private networkStrategyInFlight: boolean = false;
   private nativeTunnelDeathLogged: boolean = false;
+  private nativeTunnelRecoveryInFlight: boolean = false;
+  private lastRecoveredLostNetId: number = -1;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'WgVpnExtension onCreate');
@@ -97,17 +107,63 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
 
   onRequest(want: Want, startId: number): void {
     hilog.info(DOMAIN, TAG, 'WgVpnExtension onRequest startId=%{public}d ability=%{public}s', startId, want.abilityName ?? '');
-    if (this.isRestoreWant(want) && this.tunnelHandle !== 0) {
-      this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'publish restore status failed: %{public}s', this.formatError(err));
-      });
+    if (this.isNetworkLostWant(want)) {
+      this.recoverVpnNetwork(want);
       return;
+    }
+    if (this.isRestoreWant(want)) {
+      if (this.restartRequestCount > 0 || this.nativeTunnelRecoveryInFlight) {
+        hilog.info(
+          DOMAIN,
+          TAG,
+          'skip restore request, recovery pending pendingRestarts=%{public}d nativeRecovery=%{public}s',
+          this.restartRequestCount,
+          String(this.nativeTunnelRecoveryInFlight)
+        );
+        return;
+      }
+      if (this.tunnelHandle !== 0 && queryVpnNetworkAvailable() !== false) {
+        this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'publish restore status failed: %{public}s', this.formatError(err));
+        });
+        hilog.info(DOMAIN, TAG, 'skip restore request, vpn network and native handle available');
+        return;
+      }
+      if (this.tunnelHandle !== 0) {
+        hilog.warn(DOMAIN, TAG, 'restore request detected missing vpn network, rebuild native handle=%{public}d', this.tunnelHandle);
+      }
     }
 
     this.restartWireGuard('onRequest', true).catch((err: BusinessError) => {
       hilog.error(DOMAIN, TAG, 'restart failed: %{public}s', this.formatError(err));
       this.cleanup().catch((cleanupErr: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'cleanup after restart failure failed: %{public}s', this.formatError(cleanupErr));
+      });
+    });
+  }
+
+  private recoverVpnNetwork(want: Want): void {
+    const lostNetId = this.wantNumber(want, 'lostNetId');
+    if (this.restartRequestCount > 0 || this.nativeTunnelRecoveryInFlight ||
+      (lostNetId >= 0 && lostNetId === this.lastRecoveredLostNetId)) {
+      hilog.info(
+        DOMAIN,
+        TAG,
+        'skip vpn network recovery lostNetId=%{public}d pendingRestarts=%{public}d nativeRecovery=%{public}s',
+        lostNetId,
+        this.restartRequestCount,
+        String(this.nativeTunnelRecoveryInFlight)
+      );
+      return;
+    }
+    this.restartWireGuard('vpn-network-lost:' + String(lostNetId), true).then(() => {
+      if (lostNetId >= 0) {
+        this.lastRecoveredLostNetId = lostNetId;
+      }
+    }).catch((err: BusinessError) => {
+      hilog.error(DOMAIN, TAG, 'vpn network recovery failed: %{public}s', this.formatError(err));
+      this.cleanup().catch((cleanupErr: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'cleanup after vpn network recovery failed: %{public}s', this.formatError(cleanupErr));
       });
     });
   }
@@ -124,13 +180,18 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     cleanupFirst: boolean,
     desiredState?: DesiredVpnState
   ): Promise<void> {
+    this.restartRequestCount++;
     const task = this.restartQueue.then(() => {
       return this.doRestartWireGuard(reason, cleanupFirst, desiredState);
     });
     this.restartQueue = task.catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restart queue task failed: %{public}s', this.formatError(err));
     });
-    await task;
+    try {
+      await task;
+    } finally {
+      this.restartRequestCount--;
+    }
   }
 
   private async doRestartWireGuard(
@@ -269,6 +330,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       this.startNetworkObserver();
       this.startDataTransferNotificationUpdates();
       this.startRuntimeStatusPublishUpdates();
+      this.startNativeTunnelHealthMonitor();
       this.publishRuntimeStatus(true, true).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'publish initial runtime status failed: %{public}s', this.formatError(err));
       });
@@ -332,8 +394,22 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
   private canReuseRunningTunnel(desiredState: DesiredVpnState): boolean {
     return this.tunnelHandle !== 0 &&
       this.vpnConnection !== undefined &&
+      this.isCurrentNativeTunnelAlive() &&
       this.runningConfigFingerprint.length > 0 &&
       this.runningConfigFingerprint === desiredState.fingerprint;
+  }
+
+  private isCurrentNativeTunnelAlive(): boolean {
+    if (this.tunnelHandle === 0) {
+      return false;
+    }
+    try {
+      return NativeTunnel.isAlive(this.tunnelHandle);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'native tunnel alive query failed: %{public}s', this.formatError(error));
+      return false;
+    }
   }
 
   private buildVpnStateFingerprint(
@@ -691,6 +767,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     this.stopNetworkObserver();
     this.stopDataTransferNotificationUpdates();
     this.stopRuntimeStatusPublishUpdates();
+    this.stopNativeTunnelHealthMonitor();
     this.lastForceHandshakeAt = 0;
     this.runningConfigFingerprint = '';
     this.nativeTunnelDeathLogged = false;
@@ -754,6 +831,48 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       clearInterval(this.runtimeStatusPublishTimer);
       this.runtimeStatusPublishTimer = -1;
     }
+  }
+
+  private startNativeTunnelHealthMonitor(): void {
+    this.stopNativeTunnelHealthMonitor();
+    this.nativeTunnelHealthTimer = setInterval(() => {
+      this.checkNativeTunnelHealth().catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'native tunnel health check failed: %{public}s', this.formatError(err));
+      });
+    }, NATIVE_TUNNEL_HEALTH_INTERVAL_MS);
+  }
+
+  private stopNativeTunnelHealthMonitor(): void {
+    if (this.nativeTunnelHealthTimer < 0) {
+      return;
+    }
+    clearInterval(this.nativeTunnelHealthTimer);
+    this.nativeTunnelHealthTimer = -1;
+  }
+
+  private async checkNativeTunnelHealth(): Promise<void> {
+    const handle = this.tunnelHandle;
+    if (handle === 0 || this.nativeTunnelRecoveryInFlight) {
+      return;
+    }
+    let alive = false;
+    try {
+      alive = NativeTunnel.isAlive(handle);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'native tunnel health query failed: %{public}s', this.formatError(error));
+    }
+    if (alive) {
+      return;
+    }
+    let stats: TunnelStats | undefined = undefined;
+    try {
+      stats = NativeTunnel.stats(handle);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'native tunnel failure stats unavailable: %{public}s', this.formatError(error));
+    }
+    await this.handleDeadNativeTunnel('nativeHealthMonitor', stats, handle);
   }
 
   private async updateDataTransferNotification(): Promise<void> {
@@ -902,6 +1021,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     );
     this.stopDataTransferNotificationUpdates();
     this.stopRuntimeStatusPublishUpdates();
+    this.stopNativeTunnelHealthMonitor();
     this.lastForceHandshakeAt = 0;
     this.runningConfigFingerprint = '';
     this.activeTunnelId = '';
@@ -956,7 +1076,7 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         const stats = NativeTunnel.stats(this.tunnelHandle);
         if (!this.isNativeTunnelAlive(stats)) {
           await this.handleDeadNativeTunnel('publishRuntimeStatus', stats);
-          running = false;
+          return;
         } else {
           txBytes = stats.txBytes;
           rxBytes = stats.rxBytes;
@@ -1045,7 +1165,15 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
     return true;
   }
 
-  private async handleDeadNativeTunnel(reason: string, stats: TunnelStats): Promise<void> {
+  private async handleDeadNativeTunnel(
+    reason: string,
+    stats: TunnelStats | undefined,
+    detectedHandle: number = this.tunnelHandle
+  ): Promise<void> {
+    if (detectedHandle === 0 || detectedHandle !== this.tunnelHandle || this.nativeTunnelRecoveryInFlight) {
+      return;
+    }
+    this.nativeTunnelRecoveryInFlight = true;
     if (!this.nativeTunnelDeathLogged) {
       hilog.error(
         DOMAIN,
@@ -1053,24 +1181,24 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
         'WgVpnExtension native tunnel dead reason=%{public}s handle=%{public}d running=%{public}s tunAlive=%{public}s udpAlive=%{public}s exitCode=%{public}d lastWorker=%{public}s lastEvent=%{public}s lastError=%{public}s lastTickSeconds=%{public}s',
         reason,
         this.tunnelHandle,
-        String(stats.running),
-        String(stats.tunWorkerAlive),
-        String(stats.udpWorkerAlive),
-        stats.workerExitCode,
-        stats.lastWorker,
-        stats.lastEvent,
-        stats.lastError,
-        stats.lastTickSeconds.toFixed(3)
+        String(stats === undefined ? false : stats.running),
+        String(stats === undefined ? false : stats.tunWorkerAlive),
+        String(stats === undefined ? false : stats.udpWorkerAlive),
+        stats === undefined ? 0 : stats.workerExitCode,
+        stats === undefined ? '' : stats.lastWorker,
+        stats === undefined ? 'stats_unavailable' : stats.lastEvent,
+        stats === undefined ? '' : stats.lastError,
+        stats === undefined ? '-1' : stats.lastTickSeconds.toFixed(3)
       );
       appendAgentLog(
         this.context as common.VpnExtensionContext,
         buildVpnNativeFailureLogEntry(
           this.activeTunnelName,
           reason,
-          stats.workerExitCode,
-          stats.lastWorker,
-          stats.lastEvent,
-          stats.lastError,
+          stats === undefined ? 0 : stats.workerExitCode,
+          stats === undefined ? '' : stats.lastWorker,
+          stats === undefined ? 'stats_unavailable' : stats.lastEvent,
+          stats === undefined ? '' : stats.lastError,
           Date.now()
         )
       ).catch((err: BusinessError) => {
@@ -1078,12 +1206,36 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       });
       this.nativeTunnelDeathLogged = true;
     }
-    await this.cleanup(false);
-    await this.publishRuntimeStatus(false, false);
+    try {
+      const settings: VpnKeepAliveSettings = await loadVpnKeepAliveSettings(
+        this.context as common.VpnExtensionContext,
+        true
+      );
+      if (!isVpnKeepAliveEnabled(settings)) {
+        await this.cleanup(false);
+        await this.publishRuntimeStatus(false, false);
+        return;
+      }
+      hilog.warn(
+        DOMAIN,
+        TAG,
+        'self-heal native tunnel reason=%{public}s pip=%{public}s inApp=%{public}s',
+        reason,
+        String(settings.pictureInPictureEnabled),
+        String(settings.inAppEnabled)
+      );
+      await this.restartWireGuard('native-death:' + reason, true);
+    } finally {
+      this.nativeTunnelRecoveryInFlight = false;
+    }
   }
 
   private isRestoreWant(want: Want): boolean {
     return this.wantAction(want) === WANT_ACTION_RESTORE;
+  }
+
+  private isNetworkLostWant(want: Want): boolean {
+    return this.wantAction(want) === WANT_ACTION_NETWORK_LOST;
   }
 
   private wantAction(want: Want): string {
@@ -1096,6 +1248,18 @@ export default class WgVpnExtensionAbility extends VpnExtensionAbility {
       return action;
     }
     return '';
+  }
+
+  private wantNumber(want: Want, key: string): number {
+    const parameters = want.parameters;
+    if (parameters === undefined) {
+      return -1;
+    }
+    const value = parameters[key];
+    if (typeof value === 'number') {
+      return value;
+    }
+    return -1;
   }
 
   private formatError(error: BusinessError): string {

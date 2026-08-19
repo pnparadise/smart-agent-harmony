@@ -102,6 +102,10 @@ export class NativeTunnel {
     return tunnelStats;
   }
 
+  static isAlive(handle: number): boolean {
+    return wgNative.isTunnelAlive(handle);
+  }
+
   private static numberValue(primary: number | undefined, secondary: number | undefined, fallback: number): number {
     if (primary !== undefined && !Number.isNaN(primary)) {
       return primary;

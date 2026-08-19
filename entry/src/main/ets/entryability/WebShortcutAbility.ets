@@ -1,18 +1,22 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError, commonEventManager } from '@kit.BasicServicesKit';
-import { vpnExtension } from '@kit.NetworkKit';
+import { connection, vpnExtension } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import {
   hasActiveTunnelSelection,
+  isVpnKeepAliveEnabled,
   loadActiveTunnelInfo,
-  loadTunnelRuntimeStatus,
   loadLastWebShortcutUrl,
+  loadVpnKeepAliveSettings,
   loadWebBookmarks,
   loadWebShortcutUrl,
+  VpnKeepAliveSettings,
   WebBookmarkEntry
 } from '../wireguard/ConfigStore';
+import { queryVpnNetworkAvailable, VpnNetworkMonitor } from '../wireguard/VpnNetworkMonitor';
+import { startVpnDataTransferTask } from '../wireguard/VpnBackgroundTask';
 import { syncWebHttpDnsFromDohSettings } from '../wireguard/WebHttpDns';
 import { SmartAgentStrategy } from '../wireguard/SmartAgentStrategy';
 import { activateImmersiveWindow, configureImmersiveWindow } from './ImmersiveWindow';
@@ -25,8 +29,8 @@ const BUNDLE_NAME = 'com.smart.agent';
 const MODULE_NAME = 'entry';
 const VPN_ABILITY = 'WgVpnExtensionAbility';
 const VPN_ACTION_RESTORE = 'restore';
-const VPN_RUNTIME_ALIVE_MAX_AGE_MS = 10000;
-const VPN_STARTUP_GRACE_MS = 15000;
+const VPN_ACTION_NETWORK_LOST = 'networkLost';
+const VPN_RESTORE_COOLDOWN_MS = 5000;
 const WEB_SHORTCUT_URL_KEY = 'webUrl';
 const WEB_SHORTCUT_ID_KEY = 'webShortcutId';
 const WEB_SHORTCUT_URL_STORAGE_KEY = 'webShortcutInitialUrl';
@@ -46,12 +50,15 @@ export default class WebShortcutAbility extends UIAbility {
   private shortcutId: string = '';
   private closeSubscriber?: commonEventManager.CommonEventSubscriber;
   private vpnRestoreInFlight: boolean = false;
+  private vpnNetworkMonitor: VpnNetworkMonitor = new VpnNetworkMonitor();
+  private lastVpnRestoreAt: number = 0;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     this.initializeWebEngine();
     this.pendingWant = want;
     this.subscribeCloseEvent();
+    this.startVpnNetworkObserver();
     this.restoreVpnIfNeeded('onCreate').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on create failed: %{public}s', this.formatError(err));
     });
@@ -59,6 +66,7 @@ export default class WebShortcutAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'onDestroy');
+    this.stopVpnNetworkObserver();
     this.unsubscribeCloseEvent();
   }
 
@@ -98,6 +106,7 @@ export default class WebShortcutAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, TAG, 'onForeground');
+    this.startVpnNetworkObserver();
     this.activateWindow();
     this.restoreVpnIfNeeded('onForeground').catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'restore vpn on foreground failed: %{public}s', this.formatError(err));
@@ -133,29 +142,25 @@ export default class WebShortcutAbility extends UIAbility {
         return;
       }
 
-      const runtimeStatus = await loadTunnelRuntimeStatus(this.context, true);
-      if (this.isRuntimeStatusAlive(
-        runtimeStatus.running,
-        runtimeStatus.tunnelId,
-        runtimeStatus.updatedAt,
-        decision.selectedActiveInfo.id
-      )) {
-        hilog.info(
-          DOMAIN,
-          TAG,
-          'WebShortcutAbility skip vpn restore reason=%{public}s, runtime alive tunnelId=%{public}s',
-          reason,
-          runtimeStatus.tunnelId
-        );
+      const vpnNetworkAvailable = queryVpnNetworkAvailable();
+      if (vpnNetworkAvailable === undefined) {
+        hilog.warn(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, vpn network query failed', reason);
         return;
       }
-      if (!runtimeStatus.running && runtimeStatus.tunnelId === decision.selectedActiveInfo.id &&
-        runtimeStatus.updatedAt > 0 && Date.now() - runtimeStatus.updatedAt <= VPN_STARTUP_GRACE_MS) {
-        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, startup pending', reason);
+      if (vpnNetworkAvailable) {
+        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, vpn network available', reason);
         return;
       }
 
-      await vpnExtension.startVpnExtensionAbility(this.buildVpnWant());
+      const now = Date.now();
+      if (now - this.lastVpnRestoreAt < VPN_RESTORE_COOLDOWN_MS) {
+        hilog.info(DOMAIN, TAG, 'WebShortcutAbility skip vpn restore reason=%{public}s, cooldown active', reason);
+        return;
+      }
+      this.lastVpnRestoreAt = now;
+
+      await startVpnDataTransferTask(this.context);
+      await vpnExtension.startVpnExtensionAbility(this.buildVpnWant(VPN_ACTION_RESTORE));
       hilog.info(
         DOMAIN,
         TAG,
@@ -169,29 +174,70 @@ export default class WebShortcutAbility extends UIAbility {
     }
   }
 
-  private isRuntimeStatusAlive(
-    running: boolean,
-    tunnelId: string,
-    updatedAt: number,
-    expectedTunnelId: string
-  ): boolean {
-    if (!running || tunnelId.length === 0 || updatedAt <= 0) {
-      return false;
-    }
-    if (expectedTunnelId.length === 0 || tunnelId !== expectedTunnelId) {
-      return false;
-    }
-    return Date.now() - updatedAt <= VPN_RUNTIME_ALIVE_MAX_AGE_MS;
+  private startVpnNetworkObserver(): void {
+    this.vpnNetworkMonitor.start({
+      onAvailable: (netHandle: connection.NetHandle) => {
+        hilog.info(DOMAIN, TAG, 'vpn network available netId=%{public}d', netHandle.netId);
+      },
+      onLost: (netHandle: connection.NetHandle) => {
+        this.handleVpnNetworkLost(netHandle).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'handle vpn network lost failed: %{public}s', this.formatError(err));
+        });
+      },
+      onError: (operation: string, error: BusinessError) => {
+        hilog.warn(
+          DOMAIN,
+          TAG,
+          'vpn network observer failed operation=%{public}s error=%{public}s',
+          operation,
+          this.formatError(error)
+        );
+      }
+    });
   }
 
-  private buildVpnWant(): Want {
+  private stopVpnNetworkObserver(): void {
+    this.vpnNetworkMonitor.stop((operation: string, error: BusinessError) => {
+      hilog.warn(
+        DOMAIN,
+        TAG,
+        'stop vpn network observer failed operation=%{public}s error=%{public}s',
+        operation,
+        this.formatError(error)
+      );
+    });
+  }
+
+  private async handleVpnNetworkLost(netHandle: connection.NetHandle): Promise<void> {
+    hilog.warn(DOMAIN, TAG, 'vpn network lost netId=%{public}d', netHandle.netId);
+    const settings: VpnKeepAliveSettings = await loadVpnKeepAliveSettings(this.context, true);
+    if (!isVpnKeepAliveEnabled(settings)) {
+      hilog.info(DOMAIN, TAG, 'skip vpn network recovery, keep alive disabled');
+      return;
+    }
+    const activeInfo = await loadActiveTunnelInfo(this.context, true);
+    if (!hasActiveTunnelSelection(activeInfo)) {
+      hilog.info(DOMAIN, TAG, 'skip vpn network recovery, no active tunnel');
+      return;
+    }
+    const decision = await new SmartAgentStrategy(this.context).resolveDecision();
+    if (!decision.shouldConnectVpn || !hasActiveTunnelSelection(decision.selectedActiveInfo)) {
+      hilog.info(DOMAIN, TAG, 'skip vpn network recovery, smart agent direct');
+      return;
+    }
+    await startVpnDataTransferTask(this.context);
+    await vpnExtension.startVpnExtensionAbility(this.buildVpnWant(VPN_ACTION_NETWORK_LOST, netHandle.netId));
+  }
+
+  private buildVpnWant(action: string, lostNetId: number = -1): Want {
     const want: Want = {
       deviceId: '',
       bundleName: BUNDLE_NAME,
       moduleName: MODULE_NAME,
       abilityName: VPN_ABILITY,
       parameters: {
-        action: VPN_ACTION_RESTORE
+        action: action,
+        lostNetId: lostNetId
       }
     };
     return want;

@@ -249,6 +249,11 @@ pub fn get_tunnel_stats(handle: i32) -> Result<NativeTunnelStats> {
 }
 
 #[napi]
+pub fn is_tunnel_alive(handle: i32) -> Result<bool> {
+    Ok(get_runtime(handle)?.is_running())
+}
+
+#[napi]
 pub fn get_tick_count() -> Result<f64> {
     Ok(GLOBAL_TICK_COUNT.load(Ordering::SeqCst) as f64)
 }

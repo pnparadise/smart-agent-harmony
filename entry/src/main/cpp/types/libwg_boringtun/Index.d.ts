@@ -32,6 +32,8 @@ export const stopTunnel: (handle: number) => void;
 
 export const getTunnelStats: (handle: number) => NativeTunnelStats;
 
+export const isTunnelAlive: (handle: number) => boolean;
+
 export const getTickCount: () => number;
 
 export const getTunnelTickCount: (handle: number) => number;

@@ -63,6 +63,15 @@ export interface SplitAppInfo {
   label: string;
 }
 
+export interface VpnKeepAliveSettings {
+  pictureInPictureEnabled: boolean;
+  inAppEnabled: boolean;
+}
+
+export function isVpnKeepAliveEnabled(settings: VpnKeepAliveSettings): boolean {
+  return settings.pictureInPictureEnabled || settings.inAppEnabled;
+}
+
 export interface WebBookmarkEntry {
   id: string;
   url: string;
@@ -124,6 +133,7 @@ const DOH_PROVIDER_KEY = 'wg_doh_provider';
 const BROWSER_DOH_ENABLED_KEY = 'wg_browser_doh_enabled';
 const BROWSER_DOH_PROVIDER_KEY = 'wg_browser_doh_provider';
 const VPN_PICTURE_IN_PICTURE_ENABLED_KEY = 'wg_vpn_picture_in_picture_enabled';
+const VPN_IN_APP_KEEP_ALIVE_ENABLED_KEY = 'wg_vpn_in_app_keep_alive_enabled';
 const WEB_PINNED_URL_KEY = 'wg_web_pinned_url';
 const WEB_LAST_URL_KEY = 'wg_web_last_url';
 const WEB_SHORTCUT_URL_PREFIX = 'wg_web_shortcut_url_';
@@ -460,6 +470,32 @@ export async function loadVpnPictureInPictureEnabled(
 ): Promise<boolean> {
   const store = await getMainStoreForLoad(context, reloadFromDisk);
   return await store.get(VPN_PICTURE_IN_PICTURE_ENABLED_KEY, false) as boolean;
+}
+
+export async function saveVpnInAppKeepAliveEnabled(context: StoreContext, enabled: boolean): Promise<void> {
+  const store = await getMainStoreForWrite(context);
+  await store.put(VPN_IN_APP_KEEP_ALIVE_ENABLED_KEY, enabled);
+  await store.flush();
+}
+
+export async function loadVpnInAppKeepAliveEnabled(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<boolean> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  return await store.get(VPN_IN_APP_KEEP_ALIVE_ENABLED_KEY, false) as boolean;
+}
+
+export async function loadVpnKeepAliveSettings(
+  context: StoreContext,
+  reloadFromDisk: boolean = false
+): Promise<VpnKeepAliveSettings> {
+  const store = await getMainStoreForLoad(context, reloadFromDisk);
+  const settings: VpnKeepAliveSettings = {
+    pictureInPictureEnabled: await store.get(VPN_PICTURE_IN_PICTURE_ENABLED_KEY, false) as boolean,
+    inAppEnabled: await store.get(VPN_IN_APP_KEEP_ALIVE_ENABLED_KEY, false) as boolean
+  };
+  return settings;
 }
 
 export async function saveAgentRules(context: StoreContext, rules: AgentRule[]): Promise<void> {

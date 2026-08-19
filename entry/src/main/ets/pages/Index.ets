@@ -25,6 +25,7 @@ import {
   loadSmartAgentEnabled,
   loadTunnelRuntimeStatus,
   loadTunnels,
+  loadVpnInAppKeepAliveEnabled,
   loadVpnPictureInPictureEnabled,
   saveAgentRules,
   saveActiveTunnel,
@@ -35,6 +36,7 @@ import {
   saveSmartAgentEnabled,
   saveTunnelRuntimeStatus,
   saveTunnel,
+  saveVpnInAppKeepAliveEnabled,
   saveVpnPictureInPictureEnabled,
   SplitAppInfo,
   TunnelConfig,
@@ -132,6 +134,7 @@ struct Index {
   @State private browserDohEnabled: boolean = true;
   @State private browserDohProvider: string = DEFAULT_DOH_PROVIDER;
   @State private vpnPictureInPictureEnabled: boolean = false;
+  @State private vpnInAppKeepAliveEnabled: boolean = false;
   @State private selectedSplitApps: SplitAppInfo[] = [];
   @State private appPickerOpen: boolean = false;
   @State private availableSplitApps: SplitAppInfo[] = [];
@@ -153,6 +156,7 @@ struct Index {
   private dohLoadVersion: number = 0;
   private browserDohLoadVersion: number = 0;
   private vpnPictureInPictureLoadVersion: number = 0;
+  private vpnInAppKeepAliveLoadVersion: number = 0;
   private logsLoadVersion: number = 0;
 
   aboutToAppear(): void {
@@ -163,6 +167,7 @@ struct Index {
     this.loadDohSettings();
     this.loadBrowserDohSettings();
     this.loadVpnPictureInPictureSetting();
+    this.loadVpnInAppKeepAliveSetting();
     if (this.currentTabIndex === TAB_LOGS) {
       this.loadLogs();
     }
@@ -448,6 +453,7 @@ struct Index {
             browserDohEnabled: this.browserDohEnabled,
             browserDohProvider: this.browserDohProvider,
             vpnPictureInPictureEnabled: this.vpnPictureInPictureEnabled,
+            vpnInAppKeepAliveEnabled: this.vpnInAppKeepAliveEnabled,
             selectedSplitAppCount: this.selectedSplitApps.length,
             onToggleAppSplit: () => {
               this.toggleAppSplit().catch((err: BusinessError) => {
@@ -497,6 +503,11 @@ struct Index {
             },
             onToggleVpnPictureInPicture: () => {
               this.toggleVpnPictureInPicture().catch((err: BusinessError) => {
+                this.statusText = err.message ?? JSON.stringify(err);
+              });
+            },
+            onToggleVpnInAppKeepAlive: () => {
+              this.toggleVpnInAppKeepAlive().catch((err: BusinessError) => {
                 this.statusText = err.message ?? JSON.stringify(err);
               });
             },
@@ -749,6 +760,24 @@ struct Index {
     }
   }
 
+  private async loadVpnInAppKeepAliveSetting(): Promise<void> {
+    const loadVersion = ++this.vpnInAppKeepAliveLoadVersion;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const enabled = await loadVpnInAppKeepAliveEnabled(context, true);
+      if (loadVersion !== this.vpnInAppKeepAliveLoadVersion) {
+        return;
+      }
+      this.vpnInAppKeepAliveEnabled = enabled;
+    } catch (err) {
+      if (loadVersion !== this.vpnInAppKeepAliveLoadVersion) {
+        return;
+      }
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'load vpn in-app keep alive setting failed: %{public}s', error.message ?? JSON.stringify(err));
+    }
+  }
+
   private async toggleSmartAgent(): Promise<void> {
     this.smartAgentLoadVersion++;
     const nextEnabled = !this.smartAgentEnabled;
@@ -765,6 +794,35 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     await saveVpnPictureInPictureEnabled(context, nextEnabled);
     await this.syncVpnPictureInPicture();
+    if (nextEnabled) {
+      await this.ensureVpnForKeepAlive('picture in picture keep alive enabled');
+    }
+  }
+
+  private async toggleVpnInAppKeepAlive(): Promise<void> {
+    this.vpnInAppKeepAliveLoadVersion++;
+    const nextEnabled = !this.vpnInAppKeepAliveEnabled;
+    this.vpnInAppKeepAliveEnabled = nextEnabled;
+    const context = getContext(this) as common.UIAbilityContext;
+    await saveVpnInAppKeepAliveEnabled(context, nextEnabled);
+    if (nextEnabled) {
+      await this.ensureVpnForKeepAlive('in-app keep alive enabled');
+    }
+  }
+
+  private async ensureVpnForKeepAlive(reason: string): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const activeInfo = await loadActiveTunnelInfo(context, true);
+    if (!hasActiveTunnelSelection(activeInfo)) {
+      return;
+    }
+    const decision = await new SmartAgentStrategy(context).resolveDecision();
+    if (!decision.shouldConnectVpn || !hasActiveTunnelSelection(decision.selectedActiveInfo)) {
+      return;
+    }
+    await startVpnDataTransferTask(context);
+    await vpnExtension.startVpnExtensionAbility(this.buildRestoreWant());
+    hilog.info(DOMAIN, TAG, 'keep alive vpn check requested reason=%{public}s', reason);
   }
 
   private async syncVpnPictureInPicture(): Promise<void> {

@@ -60,6 +60,8 @@ declare module 'libwg_boringtun.so' {
 
   export function getTunnelStats(handle: number): NativeTunnelStats;
 
+  export function isTunnelAlive(handle: number): boolean;
+
   export function getTickCount(): number;
 
   export function getTunnelTickCount(handle: number): number;
@@ -74,6 +76,7 @@ declare module 'libwg_boringtun.so' {
     startTunnel: typeof startTunnel,
     stopTunnel: typeof stopTunnel,
     getTunnelStats: typeof getTunnelStats,
+    isTunnelAlive: typeof isTunnelAlive,
     getTickCount: typeof getTickCount,
     getTunnelTickCount: typeof getTunnelTickCount,
     getPersistentKeepaliveSeconds: typeof getPersistentKeepaliveSeconds,
