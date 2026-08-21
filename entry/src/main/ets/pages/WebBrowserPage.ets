@@ -462,6 +462,9 @@ export struct WebBrowserPage {
 
   private showWebError(surfaceKey: string, event: WebViewSurfaceLoadErrorEvent): void {
     const url = event.url.length > 0 ? event.url : this.currentUrl;
+    this.debugBrowser('loadError surface=' + surfaceKey + ' kind=' + event.kind +
+      ' code=' + String(event.code) + ' url=' + this.debugBrowserUrl(url) +
+      ' message=' + event.message);
     if (!this.shouldShowWebErrorForActiveNavigation(surfaceKey, event)) {
       hilog.info(DOMAIN, TAG, 'suppress passive web error kind=%{public}s code=%{public}d url=%{public}s',
         event.kind,
@@ -575,6 +578,8 @@ export struct WebBrowserPage {
   }
 
   private handleWebSurfacePageBegin(surfaceKey: string, url: string): void {
+    this.debugBrowser('pageBegin surface=' + surfaceKey + ' url=' + this.debugBrowserUrl(url) +
+      ' active=' + this.webSurfaceKey + ' current=' + this.debugBrowserUrl(this.currentUrl));
     hilog.info(DOMAIN, TAG,
       'surface page begin surface=%{public}s url=%{public}s shouldHandle=%{public}s activeSurface=%{public}s bookmarkHomeVisible=%{public}s surfaces=%{public}s',
       surfaceKey,
@@ -605,6 +610,8 @@ export struct WebBrowserPage {
     url: string,
     isMainFrame: boolean
   ): void {
+    this.debugBrowser('navigationCommitted surface=' + surfaceKey + ' url=' + this.debugBrowserUrl(url) +
+      ' main=' + String(isMainFrame) + ' active=' + this.webSurfaceKey);
     hilog.info(DOMAIN, TAG,
       'surface navigation committed surface=%{public}s url=%{public}s mainFrame=%{public}s shouldHandle=%{public}s activeSurface=%{public}s navigation=%{public}s surfaces=%{public}s',
       surfaceKey,
@@ -641,6 +648,8 @@ export struct WebBrowserPage {
   }
 
   private handleWebSurfacePageVisible(surfaceKey: string): void {
+    this.debugBrowser('pageVisible surface=' + surfaceKey + ' current=' + this.debugBrowserUrl(this.currentUrl) +
+      ' controller=' + this.debugBrowserUrl(this.safeControllerUrl()));
     hilog.info(DOMAIN, TAG,
       'surface page visible surface=%{public}s shouldHandle=%{public}s activeSurface=%{public}s currentUrl=%{public}s surfaces=%{public}s',
       surfaceKey,
@@ -660,6 +669,9 @@ export struct WebBrowserPage {
   }
 
   private handleWebSurfacePageEnd(surfaceKey: string, url: string): void {
+    this.debugBrowser('pageEnd surface=' + surfaceKey + ' event=' + this.debugBrowserUrl(url) +
+      ' current=' + this.debugBrowserUrl(this.currentUrl) +
+      ' controller=' + this.debugBrowserUrl(this.safeControllerUrl()));
     hilog.info(DOMAIN, TAG,
       'surface page end surface=%{public}s url=%{public}s activeSurface=%{public}s bookmarkHomeVisible=%{public}s navigation=%{public}s surfaces=%{public}s',
       surfaceKey,
@@ -1079,6 +1091,12 @@ export struct WebBrowserPage {
   private surfaceInitialUrl(surfaceKey: string): string {
     const surface = this.webSurfaceByKey(surfaceKey);
     if (surface !== undefined) {
+      // Keep Web.src stable after the surface is created. Redirect chains update
+      // the controller URL and tab state; changing Web.src during that chain can
+      // restart ArkWeb's load and leave the surface blank.
+      if (surface.sourceUrl.length > 0) {
+        return surface.sourceUrl;
+      }
       if (this.shouldRestoreSurfaceOnAttach(surface)) {
         hilog.info(DOMAIN, TAG,
           'surface initial url deferred for restore surface=%{public}s id=%{public}s',
@@ -1088,14 +1106,22 @@ export struct WebBrowserPage {
       }
       const tabUrl = WebBrowserTabModel.tabUrl(this.webTabStates, surface.id);
       if (this.isWebLoadableUrl(tabUrl)) {
-        return this.normalizeUrl(tabUrl);
+        surface.sourceUrl = this.normalizeUrl(tabUrl);
+        return surface.sourceUrl;
       }
     }
     if (this.isWebLoadableUrl(this.currentUrl)) {
-      return this.normalizeUrl(this.currentUrl);
+      const normalized = this.normalizeUrl(this.currentUrl);
+      if (surface !== undefined) {
+        surface.sourceUrl = normalized;
+      }
+      return normalized;
     }
     const initial = this.normalizeUrl(this.initialUrl);
     if (this.isWebLoadableUrl(initial)) {
+      if (surface !== undefined) {
+        surface.sourceUrl = initial;
+      }
       return initial;
     }
     return '';
@@ -1428,6 +1454,10 @@ export struct WebBrowserPage {
   private setPendingLoadUrl(url: string): void {
     this.pendingLoadUrl = this.normalizeUrl(url);
     this.pendingLoadSurfaceKey = this.webSurfaceKey;
+    const surface = this.webSurfaceByKey(this.webSurfaceKey);
+    if (surface !== undefined && !surface.initialized) {
+      surface.sourceUrl = this.pendingLoadUrl;
+    }
     hilog.info(DOMAIN, TAG,
       'set pending load url=%{public}s surface=%{public}s instance=%{public}s surfaces=%{public}s',
       this.pendingLoadUrl,
@@ -2897,6 +2927,9 @@ export struct WebBrowserPage {
 
   private isBrowserStateUrl(url: string): boolean {
     const value = url.trim();
+    if (value.toLowerCase() === 'about:blank') {
+      return false;
+    }
     if (this.isBookmarkHomeUrl(value)) {
       return false;
     }
@@ -3080,6 +3113,19 @@ export struct WebBrowserPage {
       return error.message;
     }
     return JSON.stringify(err);
+  }
+
+  private debugBrowser(message: string): void {
+    console.info('[WebBrowserPage] ' + message);
+  }
+
+  private debugBrowserUrl(value: string): string {
+    const input = value.trim();
+    const queryIndex = input.indexOf('?');
+    if (queryIndex < 0) {
+      return input;
+    }
+    return input.substring(0, queryIndex) + '?<query>';
   }
 
   private beginNavigation(surfaceKey: string, trigger: WebNavigationTrigger, url: string): void {

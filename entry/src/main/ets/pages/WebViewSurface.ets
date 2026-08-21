@@ -115,14 +115,22 @@ export struct WebViewSurface {
   @State private nativeRefreshSettling: boolean = false;
   private suppressRefreshSettleOffset: boolean = false;
   private nativeRefreshSettleTimer: number = -1;
+  private popupController: webview.WebviewController = new webview.WebviewController('web_popup_initial');
+  @State private popupVisible: boolean = false;
+  private popupOrigin: string = '';
+  private popupSerial: number = 0;
+  private primaryOrigin: string = '';
 
   build() {
     Refresh({ refreshing: $$this.nativeRefreshing, builder: this.buildRefreshPlaceholder() }) {
+      Stack({ alignContent: Alignment.TopStart }) {
       Web({ src: this.src, controller: this.controller })
         .width('100%')
         .height('100%')
         .position({ x: 0, y: 0 })
         .javaScriptAccess(true)
+        .multiWindowAccess(true)
+        .allowWindowOpenMethod(true)
         .domStorageAccess(true)
         .databaseAccess(true)
         .onlineImageAccess(true)
@@ -138,15 +146,67 @@ export struct WebViewSurface {
         .enableNativeMediaPlayer(new WebViewSurfaceNativeMediaPlayerConfig())
         .onControllerAttached(() => {
           hilog.info(DOMAIN, TAG, 'controller attached src=%{public}s', this.src);
+          this.debug('controller attached src=' + this.debugUrl(this.src));
           this.onControllerAttached();
         })
+        .onWindowNew((event) => {
+          if (!event || !event.handler) {
+            return;
+          }
+          try {
+            const parentUrl = this.currentUrl();
+            this.popupController = this.createPopupController(parentUrl);
+            event.handler.setWebController(this.popupController);
+            this.popupVisible = true;
+            hilog.info(DOMAIN, TAG, 'open web popup origin=%{public}s src=%{public}s',
+              this.popupOrigin, this.src);
+            this.debug('windowNew parent=' + this.popupOrigin + ' current=' +
+              this.debugUrl(parentUrl) + ' src=' + this.debugUrl(this.src));
+          } catch (err) {
+            this.popupVisible = false;
+            hilog.warn(DOMAIN, TAG, 'open web popup failed: %{public}s',
+              this.formatError(err));
+            this.debug('windowNew failed=' + this.formatError(err));
+          }
+        })
+        .onWindowNewExt((event) => {
+          if (!event || !event.handler) {
+            return;
+          }
+          try {
+            const parentUrl = this.currentUrl();
+            this.popupController = this.createPopupController(parentUrl);
+            event.handler.setWebController(this.popupController);
+            this.popupVisible = true;
+            hilog.info(DOMAIN, TAG, 'open extended web popup origin=%{public}s src=%{public}s',
+              this.popupOrigin, this.src);
+            this.debug('windowNewExt parent=' + this.popupOrigin + ' current=' +
+              this.debugUrl(parentUrl) + ' src=' + this.debugUrl(this.src));
+          } catch (err) {
+            this.popupVisible = false;
+            hilog.warn(DOMAIN, TAG, 'open extended web popup failed: %{public}s',
+              this.formatError(err));
+            this.debug('windowNewExt failed=' + this.formatError(err));
+          }
+        })
+        .onActivateContent(() => {
+          if (this.popupControllerAttached()) {
+            this.popupVisible = true;
+            this.debug('activate popup url=' + this.debugUrl(this.popupCurrentUrl()));
+          }
+        })
         .onPageBegin((event) => {
-          this.onPageBegin({ url: event && event.url.length > 0 ? event.url : '' });
+          const pageUrl = event && event.url.length > 0 ? event.url : '';
+          this.debug('main pageBegin url=' + this.debugUrl(pageUrl));
+          this.rememberPrimaryOrigin(pageUrl);
+          this.onPageBegin({ url: pageUrl });
         })
         .onNavigationEntryCommitted((event) => {
           if (!event) {
             return;
           }
+          this.debug('main navigationCommitted url=' + this.debugUrl(event.url) +
+            ' main=' + String(event.isMainFrame) + ' same=' + String(event.isSameDocument));
           this.onNavigationCommitted({
             url: event.url,
             isMainFrame: event.isMainFrame,
@@ -167,10 +227,14 @@ export struct WebViewSurface {
           this.onProgressChange({ newProgress: event ? event.newProgress : 0 });
         })
         .onPageVisible(() => {
+          this.debug('main pageVisible url=' + this.debugUrl(this.currentUrl()));
           this.onPageVisible();
         })
         .onPageEnd((event) => {
-          this.onPageEnd({ url: event && event.url.length > 0 ? event.url : '' });
+          const pageUrl = event && event.url.length > 0 ? event.url : '';
+          this.debug('main pageEnd url=' + this.debugUrl(pageUrl) +
+            ' controller=' + this.debugUrl(this.currentUrl()));
+          this.onPageEnd({ url: pageUrl });
         })
         .onTitleReceive((event) => {
           this.onTitleReceive({ title: event ? event.title : '' });
@@ -282,6 +346,71 @@ export struct WebViewSurface {
           hilog.info(DOMAIN, TAG, 'web fullscreen exit');
           this.onFullScreenExit();
         })
+      if (this.popupVisible) {
+        Web({ src: '', controller: this.popupController })
+          .width('100%')
+          .height('100%')
+          .position({ x: 0, y: 0 })
+          .zIndex(2)
+          .javaScriptAccess(true)
+          .multiWindowAccess(true)
+          .allowWindowOpenMethod(true)
+          .domStorageAccess(true)
+          .databaseAccess(true)
+          .onlineImageAccess(true)
+          .imageAccess(true)
+          .cacheMode(CacheMode.Default)
+          .mixedMode(MixedMode.Compatible)
+          .metaViewport(true)
+          .overScrollMode(OverScrollMode.NEVER)
+          .onWindowNew((event) => {
+            if (!event || !event.handler) {
+              return;
+            }
+            try {
+              event.handler.setWebController(this.popupController);
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'reuse web popup controller failed: %{public}s',
+                this.formatError(err));
+            }
+          })
+          .onWindowNewExt((event) => {
+            if (!event || !event.handler) {
+              return;
+            }
+            try {
+              event.handler.setWebController(this.popupController);
+              this.popupVisible = true;
+              this.debug('popup windowNewExt reuse controller url=' +
+                this.debugUrl(this.popupCurrentUrl()));
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'reuse extended web popup controller failed: %{public}s',
+                this.formatError(err));
+            }
+          })
+          .onActivateContent(() => {
+            this.popupVisible = true;
+            this.debug('popup activate content url=' + this.debugUrl(this.popupCurrentUrl()));
+          })
+          .onPageBegin((event) => {
+            this.debug('popup pageBegin url=' + this.debugUrl(event ? event.url : ''));
+            this.handlePopupNavigation(event ? event.url : '');
+          })
+          .onPageEnd((event) => {
+            this.debug('popup pageEnd url=' + this.debugUrl(event ? event.url : '') +
+              ' controller=' + this.debugUrl(this.popupCurrentUrl()));
+            this.handlePopupNavigation(event ? event.url : '');
+          })
+          .onPageVisible(() => {
+            this.debug('popup pageVisible url=' + this.debugUrl(this.popupCurrentUrl()));
+            this.handlePopupNavigation(this.popupCurrentUrl());
+          })
+          .onWindowExit(() => {
+            this.debug('popup windowExit url=' + this.debugUrl(this.popupCurrentUrl()));
+            this.popupVisible = false;
+          })
+      }
+      }
     }
       .width('100%')
       .height('100%')
@@ -318,6 +447,7 @@ export struct WebViewSurface {
 
   aboutToDisappear(): void {
     this.stopNativeRefreshSettleTimer();
+    this.popupVisible = false;
   }
 
   @Builder
@@ -429,6 +559,84 @@ export struct WebViewSurface {
     } catch (err) {
       return '';
     }
+  }
+
+  private handlePopupNavigation(value: string): void {
+    const popupUrl = value.trim();
+    if (popupUrl.length === 0 || popupUrl.toLowerCase() === 'about:blank' || !this.popupVisible) {
+      return;
+    }
+    const origin = this.webOrigin(popupUrl);
+    this.debug('popup evaluate url=' + this.debugUrl(popupUrl) + ' origin=' + origin +
+      ' parent=' + this.popupOrigin);
+    if (origin.length === 0 || this.popupOrigin.length === 0 || origin !== this.popupOrigin) {
+      return;
+    }
+    this.popupVisible = false;
+    try {
+      this.controller.loadUrl(popupUrl);
+      hilog.info(DOMAIN, TAG, 'route same-origin popup navigation to primary surface url=%{public}s', popupUrl);
+      this.debug('same-origin popup navigation routed to main url=' + this.debugUrl(popupUrl));
+    } catch (err) {
+      this.onLoadError({
+        url: popupUrl,
+        isMainFrame: true,
+        code: 0,
+        message: this.formatError(err),
+        kind: 'popup-controller'
+      });
+      this.debug('popup callback route failed=' + this.formatError(err));
+    }
+  }
+
+  private createPopupController(parentUrl: string): webview.WebviewController {
+    const currentOrigin = this.webOrigin(parentUrl);
+    const sourceOrigin = this.webOrigin(this.src);
+    this.popupOrigin = currentOrigin.length > 0 ? currentOrigin : sourceOrigin;
+    if (this.popupOrigin.length === 0) {
+      this.popupOrigin = this.primaryOrigin;
+    }
+    return new webview.WebviewController('web_popup_' + String(++this.popupSerial));
+  }
+
+  private popupControllerAttached(): boolean {
+    return this.popupCurrentUrl().trim().length > 0;
+  }
+
+  private webOrigin(value: string): string {
+    const match = value.trim().match(/^https?:\/\/[^/]+/i);
+    if (match === null) {
+      return '';
+    }
+    return match[0].toLowerCase().replace(':443', '').replace(':80', '');
+  }
+
+  private rememberPrimaryOrigin(value: string): void {
+    const origin = this.webOrigin(value);
+    if (origin.length > 0 && !this.popupVisible) {
+      this.primaryOrigin = origin;
+    }
+  }
+
+  private popupCurrentUrl(): string {
+    try {
+      return this.popupController.getUrl();
+    } catch (err) {
+      return '';
+    }
+  }
+
+  private debug(message: string): void {
+    console.info('[WebViewSurface] ' + message);
+  }
+
+  private debugUrl(value: string): string {
+    const input = value.trim();
+    const queryIndex = input.indexOf('?');
+    if (queryIndex < 0) {
+      return input;
+    }
+    return input.substring(0, queryIndex) + '?<query>';
   }
 
   private formatError(err: Object): string {

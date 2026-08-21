@@ -9,6 +9,7 @@ export interface WebSurfaceEntry {
   id: string;
   surfaceKey: string;
   controller: webview.WebviewController;
+  sourceUrl: string;
   attached: boolean;
   initialized: boolean;
   visible: boolean;
@@ -50,6 +51,7 @@ export class WebBrowserSurfaceRegistry {
       id: stateKey,
       surfaceKey: key,
       controller: new webview.WebviewController(key),
+      sourceUrl: '',
       attached: false,
       initialized: false,
       visible: false,
