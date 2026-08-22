@@ -122,8 +122,8 @@ export struct WebViewSurface {
   private primaryOrigin: string = '';
 
   build() {
-    Refresh({ refreshing: $$this.nativeRefreshing, builder: this.buildRefreshPlaceholder() }) {
-      Stack({ alignContent: Alignment.TopStart }) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Refresh({ refreshing: $$this.nativeRefreshing, builder: this.buildRefreshPlaceholder() }) {
       Web({ src: this.src, controller: this.controller })
         .width('100%')
         .height('100%')
@@ -346,6 +346,31 @@ export struct WebViewSurface {
           hilog.info(DOMAIN, TAG, 'web fullscreen exit');
           this.onFullScreenExit();
         })
+      }
+        .width('100%')
+        .height('100%')
+        .pullToRefresh(this.nativePullRefreshEnabled())
+        .pullDownRatio(this.nativePullRefreshEnabled() ? 1 : 0)
+        .refreshOffset(WEB_NATIVE_PULL_REFRESH_DISTANCE)
+        .maxPullDownDistance(WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE)
+        .onOffsetChange((offset: number) => {
+          if (this.suppressRefreshSettleOffset) {
+            if (offset <= 0) {
+              this.completeNativeRefreshSettle();
+              this.onPullRefreshOffsetChange(0);
+            }
+            return;
+          }
+          this.onPullRefreshOffsetChange(offset);
+        })
+        .onRefreshing(() => {
+          // The custom browser indicator owns the long-running refresh state. Keep
+          // the native Refresh component only for recognizing the pull gesture so
+          // it does not retain the WebView's vertical gesture stream.
+          this.beginNativeRefreshSettle();
+          this.onPullRefreshing();
+          this.nativeRefreshing = false;
+        })
       if (this.popupVisible) {
         Web({ src: '', controller: this.popupController })
           .width('100%')
@@ -410,32 +435,9 @@ export struct WebViewSurface {
             this.popupVisible = false;
           })
       }
-      }
     }
       .width('100%')
       .height('100%')
-      .pullToRefresh(this.nativePullRefreshEnabled())
-      .pullDownRatio(this.nativePullRefreshEnabled() ? 1 : 0)
-      .refreshOffset(WEB_NATIVE_PULL_REFRESH_DISTANCE)
-      .maxPullDownDistance(WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE)
-      .onOffsetChange((offset: number) => {
-        if (this.suppressRefreshSettleOffset) {
-          if (offset <= 0) {
-            this.completeNativeRefreshSettle();
-            this.onPullRefreshOffsetChange(0);
-          }
-          return;
-        }
-        this.onPullRefreshOffsetChange(offset);
-      })
-      .onRefreshing(() => {
-        // The custom browser indicator owns the long-running refresh state. Keep
-        // the native Refresh component only for recognizing the pull gesture so
-        // it does not retain the WebView's vertical gesture stream.
-        this.beginNativeRefreshSettle();
-        this.onPullRefreshing();
-        this.nativeRefreshing = false;
-      })
   }
 
   aboutToAppear(): void {
