@@ -95,6 +95,8 @@ export struct WebViewSurface {
   @Prop pullRefreshEnabled: boolean = false;
   @Prop @Watch('onPullRefreshRefreshingChanged') pullRefreshRefreshing: boolean = false;
   controller: webview.WebviewController = new webview.WebviewController();
+  onBackHandlerReady: (handler: () => boolean) => void = () => {};
+  onBackHandlerRelease: () => void = () => {};
   onControllerAttached: () => void = () => {};
   onPageBegin: (event: WebViewSurfacePageEvent) => void = () => {};
   onNavigationCommitted: (event: WebViewSurfaceNavigationEvent) => void = () => {};
@@ -445,11 +447,13 @@ export struct WebViewSurface {
     this.suppressRefreshSettleOffset = false;
     this.nativeRefreshSettling = false;
     this.nativeRefreshing = false;
+    this.onBackHandlerReady((): boolean => this.handleBackNavigation());
   }
 
   aboutToDisappear(): void {
     this.stopNativeRefreshSettleTimer();
     this.popupVisible = false;
+    this.onBackHandlerRelease();
   }
 
   @Builder
@@ -561,6 +565,17 @@ export struct WebViewSurface {
     } catch (err) {
       return '';
     }
+  }
+
+  private handleBackNavigation(): boolean {
+    if (!this.popupVisible) {
+      return false;
+    }
+    this.debug('close popup from back url=' + this.debugUrl(this.popupCurrentUrl()));
+    this.popupVisible = false;
+    this.popupOrigin = '';
+    this.popupController = new webview.WebviewController('web_popup_closed_' + String(++this.popupSerial));
+    return true;
   }
 
   private handlePopupNavigation(value: string): void {

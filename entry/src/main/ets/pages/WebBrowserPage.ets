@@ -47,6 +47,11 @@ import {
   WebViewSurfaceFaviconEvent
 } from './WebViewSurface';
 
+interface WebSurfaceBackHandlerEntry {
+  surfaceKey: string;
+  handler: () => boolean;
+}
+
 const DOMAIN = 0x0001;
 const TAG = 'WebBrowserPage';
 const BUNDLE_NAME = 'com.smart.agent';
@@ -190,6 +195,7 @@ export struct WebBrowserPage {
   @State private webSurfaceKeys: string[] = [];
   @State private webSurfaceKey: string = WEB_HOME_TAB_ID + '_0';
   private webSurfaceRegistry: WebBrowserSurfaceRegistry = new WebBrowserSurfaceRegistry();
+  private webSurfaceBackHandlers: WebSurfaceBackHandlerEntry[] = [];
 
   aboutToAppear(): void {
     this.configureBrowserStorage();
@@ -253,6 +259,12 @@ export struct WebBrowserPage {
             srcFor: (surfaceKey: string): string => this.surfaceInitialUrl(surfaceKey),
             controllerFor: (surfaceKey: string): webview.WebviewController => this.surfaceController(surfaceKey),
             surfaceVisibleFor: (surfaceKey: string): boolean => this.webSurfaceVisible(surfaceKey),
+            onBackHandlerReady: (surfaceKey: string, handler: () => boolean): void => {
+              this.setWebSurfaceBackHandler(surfaceKey, handler);
+            },
+            onBackHandlerRelease: (surfaceKey: string): void => {
+              this.removeWebSurfaceBackHandler(surfaceKey);
+            },
             onControllerAttached: (surfaceKey: string): void => {
               this.handleWebSurfaceControllerAttached(surfaceKey);
             },
@@ -1705,6 +1717,11 @@ export struct WebBrowserPage {
       return true;
     }
 
+    const surfaceBackHandler = this.activeWebSurfaceBackHandler();
+    if (surfaceBackHandler !== undefined && surfaceBackHandler()) {
+      return true;
+    }
+
     if (this.bookmarkHomeVisible) {
       this.onClose();
       return true;
@@ -1737,6 +1754,44 @@ export struct WebBrowserPage {
       this.showNotice(this.formatError(err));
       return true;
     }
+  }
+
+  private setWebSurfaceBackHandler(surfaceKey: string, handler: () => boolean): void {
+    const next: WebSurfaceBackHandlerEntry[] = [];
+    let updated = false;
+    for (let index = 0; index < this.webSurfaceBackHandlers.length; index++) {
+      const entry = this.webSurfaceBackHandlers[index];
+      if (entry.surfaceKey === surfaceKey) {
+        next.push({ surfaceKey: surfaceKey, handler: handler });
+        updated = true;
+      } else {
+        next.push(entry);
+      }
+    }
+    if (!updated) {
+      next.push({ surfaceKey: surfaceKey, handler: handler });
+    }
+    this.webSurfaceBackHandlers = next;
+  }
+
+  private removeWebSurfaceBackHandler(surfaceKey: string): void {
+    const next: WebSurfaceBackHandlerEntry[] = [];
+    for (let index = 0; index < this.webSurfaceBackHandlers.length; index++) {
+      if (this.webSurfaceBackHandlers[index].surfaceKey !== surfaceKey) {
+        next.push(this.webSurfaceBackHandlers[index]);
+      }
+    }
+    this.webSurfaceBackHandlers = next;
+  }
+
+  private activeWebSurfaceBackHandler(): (() => boolean) | undefined {
+    for (let index = 0; index < this.webSurfaceBackHandlers.length; index++) {
+      const entry = this.webSurfaceBackHandlers[index];
+      if (entry.surfaceKey === this.webSurfaceKey) {
+        return entry.handler;
+      }
+    }
+    return undefined;
   }
 
   private syncUrlFromController(): void {

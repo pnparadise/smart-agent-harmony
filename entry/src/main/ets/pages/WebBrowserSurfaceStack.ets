@@ -27,6 +27,8 @@ export struct WebBrowserSurfaceStack {
   srcFor: (surfaceKey: string) => string = () => '';
   controllerFor: (surfaceKey: string) => webview.WebviewController = () => FALLBACK_SURFACE_CONTROLLER;
   surfaceVisibleFor: (surfaceKey: string) => boolean = () => false;
+  onBackHandlerReady: (surfaceKey: string, handler: () => boolean) => void = () => {};
+  onBackHandlerRelease: (surfaceKey: string) => void = () => {};
   onControllerAttached: (surfaceKey: string) => void = () => {};
   onPageBegin: (surfaceKey: string, event: WebViewSurfacePageEvent) => void = () => {};
   onNavigationCommitted: (surfaceKey: string, event: WebViewSurfaceNavigationEvent) => void = () => {};
@@ -52,6 +54,12 @@ export struct WebBrowserSurfaceStack {
           controller: this.controllerFor(surfaceKey),
           pullRefreshEnabled: surfaceKey === this.activeSurfaceKey && this.activePullRefreshEnabled,
           pullRefreshRefreshing: surfaceKey === this.activeSurfaceKey && this.activePullRefreshRefreshing,
+          onBackHandlerReady: (handler: () => boolean): void => {
+            this.onBackHandlerReady(surfaceKey, handler);
+          },
+          onBackHandlerRelease: (): void => {
+            this.onBackHandlerRelease(surfaceKey);
+          },
           onControllerAttached: (): void => {
             this.onControllerAttached(surfaceKey);
           },
