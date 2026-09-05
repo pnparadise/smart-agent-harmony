@@ -69,6 +69,17 @@ export struct WebBrowserChrome {
         this.buildToolbar();
       }
 
+      if (!this.showToolbar && this.loading && !this.webError.visible) {
+        Progress({ value: Math.max(8, this.progress), total: 100, type: ProgressType.Linear })
+          .width('100%')
+          .height(2)
+          .color(PRIMARY_BLUE)
+          .backgroundColor('#00000000')
+          .position({ x: 0, y: this.statusBarPadding() })
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(20)
+      }
+
       if (this.pullRefreshVisible) {
         this.buildPullRefreshIndicator();
       }
@@ -452,7 +463,7 @@ export struct WebBrowserChrome {
       return '100%';
     }
     if (!this.showToolbar) {
-      return 0;
+      return this.loading && !this.webError.visible ? this.statusBarPadding() + 2 : 0;
     }
     return this.toolbarHidden ? 0 : this.toolbarHeight();
   }

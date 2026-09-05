@@ -2,6 +2,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
+import { PRIMARY_BLUE } from './PageStyle';
 import {
   WEB_NATIVE_PULL_REFRESH_DISTANCE,
   WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE
@@ -119,6 +120,8 @@ export struct WebViewSurface {
   private nativeRefreshSettleTimer: number = -1;
   private popupController: webview.WebviewController = new webview.WebviewController('web_popup_initial');
   @State private popupVisible: boolean = false;
+  @State private popupLoading: boolean = false;
+  @State private popupProgress: number = 0;
   private popupOrigin: string = '';
   private popupSerial: number = 0;
   private primaryOrigin: string = '';
@@ -159,12 +162,14 @@ export struct WebViewSurface {
             const parentUrl = this.currentUrl();
             this.popupController = this.createPopupController(parentUrl);
             event.handler.setWebController(this.popupController);
+            this.beginPopupLoading();
             this.popupVisible = true;
             hilog.info(DOMAIN, TAG, 'open web popup origin=%{public}s src=%{public}s',
               this.popupOrigin, this.src);
             this.debug('windowNew parent=' + this.popupOrigin + ' current=' +
               this.debugUrl(parentUrl) + ' src=' + this.debugUrl(this.src));
           } catch (err) {
+            this.popupLoading = false;
             this.popupVisible = false;
             hilog.warn(DOMAIN, TAG, 'open web popup failed: %{public}s',
               this.formatError(err));
@@ -179,12 +184,14 @@ export struct WebViewSurface {
             const parentUrl = this.currentUrl();
             this.popupController = this.createPopupController(parentUrl);
             event.handler.setWebController(this.popupController);
+            this.beginPopupLoading();
             this.popupVisible = true;
             hilog.info(DOMAIN, TAG, 'open extended web popup origin=%{public}s src=%{public}s',
               this.popupOrigin, this.src);
             this.debug('windowNewExt parent=' + this.popupOrigin + ' current=' +
               this.debugUrl(parentUrl) + ' src=' + this.debugUrl(this.src));
           } catch (err) {
+            this.popupLoading = false;
             this.popupVisible = false;
             hilog.warn(DOMAIN, TAG, 'open extended web popup failed: %{public}s',
               this.formatError(err));
@@ -396,6 +403,7 @@ export struct WebViewSurface {
             }
             try {
               event.handler.setWebController(this.popupController);
+              this.beginPopupLoading();
             } catch (err) {
               hilog.warn(DOMAIN, TAG, 'reuse web popup controller failed: %{public}s',
                 this.formatError(err));
@@ -407,6 +415,7 @@ export struct WebViewSurface {
             }
             try {
               event.handler.setWebController(this.popupController);
+              this.beginPopupLoading();
               this.popupVisible = true;
               this.debug('popup windowNewExt reuse controller url=' +
                 this.debugUrl(this.popupCurrentUrl()));
@@ -420,10 +429,20 @@ export struct WebViewSurface {
             this.debug('popup activate content url=' + this.debugUrl(this.popupCurrentUrl()));
           })
           .onPageBegin((event) => {
+            this.beginPopupLoading();
             this.debug('popup pageBegin url=' + this.debugUrl(event ? event.url : ''));
             this.handlePopupNavigation(event ? event.url : '');
           })
+          .onProgressChange((event) => {
+            if (!event || !this.popupVisible || !this.popupLoading) {
+              return;
+            }
+            this.popupProgress = event.newProgress;
+            this.popupLoading = event.newProgress < 100;
+          })
           .onPageEnd((event) => {
+            this.popupLoading = false;
+            this.popupProgress = 100;
             this.debug('popup pageEnd url=' + this.debugUrl(event ? event.url : '') +
               ' controller=' + this.debugUrl(this.popupCurrentUrl()));
             this.handlePopupNavigation(event ? event.url : '');
@@ -432,10 +451,45 @@ export struct WebViewSurface {
             this.debug('popup pageVisible url=' + this.debugUrl(this.popupCurrentUrl()));
             this.handlePopupNavigation(this.popupCurrentUrl());
           })
+          .onErrorReceive((event) => {
+            if (event && event.request.isMainFrame()) {
+              this.popupLoading = false;
+            }
+          })
+          .onHttpErrorReceive((event) => {
+            if (event && event.request.isMainFrame() && event.response.getResponseCode() >= 400) {
+              this.popupLoading = false;
+            }
+          })
+          .onSslErrorEventReceive((event) => {
+            if (!event) {
+              return;
+            }
+            this.popupLoading = false;
+            try {
+              event.handler.handleCancel();
+            } catch (err) {
+            }
+          })
+          .onRenderProcessNotResponding(() => {
+            this.popupLoading = false;
+          })
           .onWindowExit(() => {
             this.debug('popup windowExit url=' + this.debugUrl(this.popupCurrentUrl()));
+            this.popupLoading = false;
             this.popupVisible = false;
           })
+      }
+
+      if (this.popupVisible && this.popupLoading) {
+        Progress({ value: Math.max(8, this.popupProgress), total: 100, type: ProgressType.Linear })
+          .width('100%')
+          .height(2)
+          .color(PRIMARY_BLUE)
+          .backgroundColor('#00000000')
+          .position({ x: 0, y: 0 })
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(3)
       }
     }
       .width('100%')
@@ -452,6 +506,7 @@ export struct WebViewSurface {
 
   aboutToDisappear(): void {
     this.stopNativeRefreshSettleTimer();
+    this.popupLoading = false;
     this.popupVisible = false;
     this.onBackHandlerRelease();
   }
@@ -572,10 +627,16 @@ export struct WebViewSurface {
       return false;
     }
     this.debug('close popup from back url=' + this.debugUrl(this.popupCurrentUrl()));
+    this.popupLoading = false;
     this.popupVisible = false;
     this.popupOrigin = '';
     this.popupController = new webview.WebviewController('web_popup_closed_' + String(++this.popupSerial));
     return true;
+  }
+
+  private beginPopupLoading(): void {
+    this.popupLoading = true;
+    this.popupProgress = 8;
   }
 
   private handlePopupNavigation(value: string): void {
@@ -589,8 +650,10 @@ export struct WebViewSurface {
     if (origin.length === 0 || this.popupOrigin.length === 0 || origin !== this.popupOrigin) {
       return;
     }
+    this.popupLoading = false;
     this.popupVisible = false;
     try {
+      this.onProgressChange({ newProgress: 8 });
       this.controller.loadUrl(popupUrl);
       hilog.info(DOMAIN, TAG, 'route same-origin popup navigation to primary surface url=%{public}s', popupUrl);
       this.debug('same-origin popup navigation routed to main url=' + this.debugUrl(popupUrl));
