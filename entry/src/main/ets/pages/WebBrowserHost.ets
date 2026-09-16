@@ -57,10 +57,11 @@ export struct WebBrowserHost {
 
   aboutToAppear(): void {
     this.appeared = true;
-    const homeUrl = this.normalizeHomeInitialUrl(this.initialUrl);
+    const isCustomLaunch = this.isCustomLaunchInstance();
+    const homeUrl = isCustomLaunch ? WEB_BOOKMARKS_HOME_URL : this.normalizeHomeInitialUrl(this.initialUrl);
     this.instances = [this.createHomeInstance(homeUrl)];
-    this.activeInstanceId = WEB_HOME_INSTANCE_ID;
-    this.bookmarkHomeVisible = this.shouldShowLaunchBookmarkHome(this.initialUrl);
+    this.activeInstanceId = isCustomLaunch ? this.safeFileSegment(this.launchInstanceId) : WEB_HOME_INSTANCE_ID;
+    this.bookmarkHomeVisible = isCustomLaunch ? false : this.shouldShowLaunchBookmarkHome(this.initialUrl);
     this.openLaunchInstanceIfNeeded(homeUrl);
     this.loadTabStates();
     this.loadBookmarks();
@@ -297,6 +298,11 @@ export struct WebBrowserHost {
       return WEB_BOOKMARKS_HOME_URL;
     }
     return this.normalizeUrl(initialUrl);
+  }
+
+  private isCustomLaunchInstance(): boolean {
+    const id = this.safeFileSegment(this.launchInstanceId);
+    return id.length > 0 && id !== WEB_HOME_INSTANCE_ID;
   }
 
   private shouldShowLaunchBookmarkHome(initialUrl: string): boolean {

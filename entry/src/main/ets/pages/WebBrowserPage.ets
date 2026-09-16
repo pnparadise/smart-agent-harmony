@@ -27,6 +27,7 @@ import { WebBrowserSurfaceRegistry, WebSurfaceEntry } from './WebBrowserSurfaceR
 import { WebBrowserSurfaceStack } from './WebBrowserSurfaceStack';
 import { WebBrowserTabModel, WebTabStateUpdate } from './WebBrowserTabModel';
 import {
+  CHROME_MOBILE_USER_AGENT,
   PullRefreshState,
   WebAddressSuggestionItem,
   WebBrowserErrorState,
@@ -78,8 +79,6 @@ const WEB_BROWSER_PULL_REFRESH_POLICY_SCRIPT =
       'return {enabled:true};' +
     '}catch(e){return {enabled:true};}' +
   '})())';
-const CHROME_MOBILE_USER_AGENT =
-  'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
 
 interface WebBrowserPullRefreshPolicyRaw {
   enabled?: boolean;

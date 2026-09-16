@@ -3,6 +3,7 @@ import { image } from '@kit.ImageKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
 import { PRIMARY_BLUE } from './PageStyle';
+import { CHROME_MOBILE_USER_AGENT } from './WebBrowserTypes';
 import {
   WEB_NATIVE_PULL_REFRESH_DISTANCE,
   WEB_NATIVE_PULL_REFRESH_MAX_DISTANCE
@@ -397,6 +398,9 @@ export struct WebViewSurface {
           .mixedMode(MixedMode.Compatible)
           .metaViewport(true)
           .overScrollMode(OverScrollMode.NEVER)
+          .onControllerAttached(() => {
+            this.configurePopupController();
+          })
           .onWindowNew((event) => {
             if (!event || !event.handler) {
               return;
@@ -445,6 +449,7 @@ export struct WebViewSurface {
             this.popupProgress = 100;
             this.debug('popup pageEnd url=' + this.debugUrl(event ? event.url : '') +
               ' controller=' + this.debugUrl(this.popupCurrentUrl()));
+            this.syncCookies();
             this.handlePopupNavigation(event ? event.url : '');
           })
           .onPageVisible(() => {
@@ -478,6 +483,7 @@ export struct WebViewSurface {
             this.debug('popup windowExit url=' + this.debugUrl(this.popupCurrentUrl()));
             this.popupLoading = false;
             this.popupVisible = false;
+            this.syncCookies();
           })
       }
 
@@ -644,6 +650,10 @@ export struct WebViewSurface {
     if (popupUrl.length === 0 || popupUrl.toLowerCase() === 'about:blank' || !this.popupVisible) {
       return;
     }
+    if (this.isInteractivePopupUrl(popupUrl)) {
+      this.debug('skip routing interactive/challenge popup url=' + this.debugUrl(popupUrl));
+      return;
+    }
     const origin = this.webOrigin(popupUrl);
     this.debug('popup evaluate url=' + this.debugUrl(popupUrl) + ' origin=' + origin +
       ' parent=' + this.popupOrigin);
@@ -666,6 +676,62 @@ export struct WebViewSurface {
         kind: 'popup-controller'
       });
       this.debug('popup callback route failed=' + this.formatError(err));
+    }
+  }
+
+  private isInteractivePopupUrl(url: string): boolean {
+    const input = url.toLowerCase();
+    return input.indexOf('challenge') >= 0 ||
+      input.indexOf('turnstile') >= 0 ||
+      input.indexOf('captcha') >= 0 ||
+      input.indexOf('cdn-cgi') >= 0 ||
+      input.indexOf('cloudflare') >= 0 ||
+      input.indexOf('oauth') >= 0 ||
+      input.indexOf('authorize') >= 0 ||
+      input.indexOf('auth/') >= 0 ||
+      input.indexOf('/auth') >= 0 ||
+      input.indexOf('login') >= 0 ||
+      input.indexOf('signin') >= 0 ||
+      input.indexOf('verify') >= 0 ||
+      input.indexOf('verification') >= 0 ||
+      input.indexOf('callback') >= 0 ||
+      input.indexOf('checkpoint') >= 0 ||
+      input.indexOf('token=') >= 0 ||
+      input.indexOf('ticket=') >= 0;
+  }
+
+  private configurePopupController(): void {
+    try {
+      let customUserAgent = this.controller.getCustomUserAgent();
+      if (customUserAgent.length === 0) {
+        customUserAgent = CHROME_MOBILE_USER_AGENT;
+      }
+      this.popupController.setCustomUserAgent(customUserAgent);
+      hilog.info(DOMAIN, TAG, 'popup custom user agent configured: %{public}s', customUserAgent);
+      this.debug('configure popup user agent=' + customUserAgent);
+    } catch (err) {
+      try {
+        this.popupController.setCustomUserAgent(CHROME_MOBILE_USER_AGENT);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'set popup fallback user agent failed: %{public}s', this.formatError(e as BusinessError));
+      }
+      hilog.warn(DOMAIN, TAG, 'configure popup user agent failed: %{public}s', this.formatError(err as BusinessError));
+    }
+
+    try {
+      this.popupController.enableIntelligentTrackingPrevention(false);
+      hilog.info(DOMAIN, TAG, 'popup disabled intelligent tracking prevention');
+      this.debug('popup disabled intelligent tracking prevention');
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'popup disable tracking prevention failed: %{public}s', this.formatError(err as BusinessError));
+    }
+  }
+
+  private syncCookies(): void {
+    try {
+      webview.WebCookieManager.saveCookieSync();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'save cookie sync failed: %{public}s', this.formatError(err as BusinessError));
     }
   }
 

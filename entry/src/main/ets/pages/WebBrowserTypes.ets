@@ -1,3 +1,6 @@
+export const CHROME_MOBILE_USER_AGENT: string =
+  'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+
 export interface WebBrowserErrorState {
   visible: boolean;
   url: string;
